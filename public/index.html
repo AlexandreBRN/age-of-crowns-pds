@@ -1,0 +1,125 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Multiplayer Map</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      background: #0d1117;
+      color: #e6edf3;
+      font-family: 'Segoe UI', monospace, sans-serif;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      min-height: 100vh;
+      gap: 20px;
+    }
+
+    h1 {
+      font-size: 1.6rem;
+      letter-spacing: 0.1em;
+      color: #58a6ff;
+    }
+
+    #lobby {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 14px;
+    }
+
+    #game {
+      display: none;
+      flex-direction: column;
+      align-items: center;
+      gap: 12px;
+    }
+
+    input {
+      padding: 10px 14px;
+      background: #161b22;
+      border: 1px solid #30363d;
+      border-radius: 6px;
+      color: #e6edf3;
+      font-size: 1rem;
+      width: 220px;
+      outline: none;
+      transition: border-color 0.2s;
+    }
+
+    input:focus { border-color: #58a6ff; }
+
+    button {
+      padding: 10px 28px;
+      background: #238636;
+      color: #fff;
+      border: none;
+      border-radius: 6px;
+      font-size: 1rem;
+      cursor: pointer;
+      transition: background 0.2s;
+    }
+
+    button:hover { background: #2ea043; }
+    button:disabled { background: #21262d; color: #8b949e; cursor: not-allowed; }
+
+    canvas {
+      border: 2px solid #30363d;
+      border-radius: 6px;
+      display: block;
+      image-rendering: pixelated;
+    }
+
+    .info {
+      font-size: 0.8rem;
+      color: #8b949e;
+      text-align: center;
+      line-height: 1.6;
+    }
+
+    #status { color: #8b949e; font-size: 0.85rem; }
+
+    .legend {
+      display: flex;
+      gap: 16px;
+      font-size: 0.78rem;
+      color: #8b949e;
+    }
+
+    .legend span::before {
+      content: '●';
+      margin-right: 4px;
+    }
+
+    .legend .me::before { color: #f78166; }
+    .legend .other::before { color: #58a6ff; }
+  </style>
+</head>
+<body>
+  <h1>Multiplayer Map</h1>
+
+  <div id="lobby">
+    <input id="nameInput" type="text" placeholder="Seu nome" maxlength="16" autocomplete="off" />
+    <button id="joinBtn" disabled>Entrar</button>
+    <span id="status">Conectando…</span>
+  </div>
+
+  <div id="game">
+    <canvas id="canvas"></canvas>
+    <div class="legend">
+      <span class="me">Você</span>
+      <span class="other">Outro jogador</span>
+    </div>
+    <div class="info">
+      Mover: <strong>WASD</strong> ou <strong>↑ ↓ ← →</strong><br />
+      <span id="playerCount">Aguardando jogadores…</span>
+    </div>
+  </div>
+
+  <script src="game.js"></script>
+</body>
+</html>
