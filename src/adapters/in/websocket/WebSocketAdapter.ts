@@ -1,17 +1,24 @@
 import WebSocket from 'ws';
 import { IJoinSessionUseCase } from '../../../core/application/ports/in/IJoinSessionUseCase';
-import { IMovePlayerUseCase } from '../../../core/application/ports/in/IMovePlayerUseCase';
 import { ILeaveSessionUseCase } from '../../../core/application/ports/in/ILeaveSessionUseCase';
+import { IMoveVillagerUseCase } from '../../../core/application/ports/in/IMoveVillagerUseCase';
+import { IGatherResourceUseCase } from '../../../core/application/ports/in/IGatherResourceUseCase';
+import { ITrainVillagerUseCase } from '../../../core/application/ports/in/ITrainVillagerUseCase';
 import { ISessionRepository } from '../../../core/application/ports/out/ISessionRepository';
-import { ClientRegistry } from '../../out/messaging/WebSocketEventPublisher';
+import { GameLoopService } from '../../../core/application/services/GameLoopService';
+import { ClientRegistry, WebSocketEventPublisher } from '../../out/messaging/WebSocketEventPublisher';
 
 export class WebSocketAdapter {
   constructor(
     private readonly joinSessionUseCase: IJoinSessionUseCase,
-    private readonly movePlayerUseCase: IMovePlayerUseCase,
     private readonly leaveSessionUseCase: ILeaveSessionUseCase,
+    private readonly moveVillagerUseCase: IMoveVillagerUseCase,
+    private readonly gatherResourceUseCase: IGatherResourceUseCase,
+    private readonly trainVillagerUseCase: ITrainVillagerUseCase,
     private readonly sessionRepository: ISessionRepository,
     private readonly clientRegistry: ClientRegistry,
+    private readonly publisher: WebSocketEventPublisher,
+    private readonly gameLoopService: GameLoopService,
   ) {}
 
   handleConnection(ws: WebSocket): void {
@@ -27,8 +34,8 @@ export class WebSocketAdapter {
           sessionId = result.sessionId;
         }
       } catch (err) {
-        const errorMessage = err instanceof Error ? err.message : 'Unknown error';
-        ws.send(JSON.stringify({ type: 'error', message: errorMessage }));
+        const msg = err instanceof Error ? err.message : 'Erro desconhecido';
+        this.publisher.sendTo(ws, { type: 'error', message: msg });
       }
     });
 
@@ -44,25 +51,44 @@ export class WebSocketAdapter {
     message: Record<string, unknown>,
     currentPlayerId: string | null,
   ): { playerId: string; sessionId: string } | null {
-    switch (message.type) {
-      case 'join':
-        return this.handleJoin(ws, String(message.playerName ?? 'Player'));
+    if (message.type === 'join') {
+      return this.handleJoin(ws, String(message.playerName ?? 'Jogador'));
+    }
 
-      case 'move':
-        if (!currentPlayerId) {
-          ws.send(JSON.stringify({ type: 'error', message: 'Not joined yet' }));
-          return null;
-        }
-        this.movePlayerUseCase.execute({
+    if (!currentPlayerId) {
+      this.publisher.sendTo(ws, { type: 'error', message: 'Entre na sessão primeiro' });
+      return null;
+    }
+
+    switch (message.type) {
+      case 'move_villager':
+        this.moveVillagerUseCase.execute({
           playerId: currentPlayerId,
-          direction: message.direction as 'up' | 'down' | 'left' | 'right',
+          villagerId: String(message.villagerId),
+          destination: message.destination as { x: number; y: number },
         });
-        return null;
+        break;
+
+      case 'gather_resource':
+        this.gatherResourceUseCase.execute({
+          playerId: currentPlayerId,
+          villagerId: String(message.villagerId),
+          nodeId: String(message.nodeId),
+        });
+        break;
+
+      case 'train_villager':
+        this.trainVillagerUseCase.execute({ playerId: currentPlayerId });
+        break;
 
       default:
-        ws.send(JSON.stringify({ type: 'error', message: `Unknown type: ${message.type}` }));
-        return null;
+        this.publisher.sendTo(ws, {
+          type: 'error',
+          message: `Tipo de mensagem desconhecido: ${message.type}`,
+        });
     }
+
+    return null;
   }
 
   private handleJoin(ws: WebSocket, playerName: string): { playerId: string; sessionId: string } {
@@ -74,23 +100,51 @@ export class WebSocketAdapter {
     this.clientRegistry.get(result.sessionId)!.add(ws);
 
     const session = this.sessionRepository.findById(result.sessionId);
-    ws.send(
-      JSON.stringify({
-        type: 'session_state',
-        playerId: result.playerId,
-        session: session?.toJSON(),
-      }),
-    );
+    const isSecondPlayer = session?.isFull ?? false;
+
+    // Send map tiles + join confirmation
+    this.publisher.sendTo(ws, {
+      type: 'game_joined',
+      playerId: result.playerId,
+      sessionId: result.sessionId,
+      waitingForOpponent: !isSecondPlayer,
+      mapTiles: session?.mapTiles ?? [],
+      initialSnapshot: session?.toStateSnapshot() ?? null,
+    });
+
+    // Notify other players that someone joined
+    const clients = this.clientRegistry.get(result.sessionId);
+    clients?.forEach((client) => {
+      if (client !== ws && client.readyState === WebSocket.OPEN) {
+        this.publisher.sendTo(client, {
+          type: 'opponent_joined',
+          playerName,
+        });
+      }
+    });
+
+    // Start game loop when 2nd player joins
+    if (isSecondPlayer && !this.gameLoopService.isRunning) {
+      this.gameLoopService.start();
+    }
 
     return result;
   }
 
   private handleDisconnect(ws: WebSocket, playerId: string, sessionId: string): void {
-    // Remove ws BEFORE publishing so the disconnecting client is skipped
+    this.gameLoopService.stop();
+
     const clients = this.clientRegistry.get(sessionId);
     if (clients) {
       clients.delete(ws);
     }
+
+    // Notify remaining clients
+    clients?.forEach((client) => {
+      if (client.readyState === WebSocket.OPEN) {
+        this.publisher.sendTo(client, { type: 'opponent_left' });
+      }
+    });
 
     this.leaveSessionUseCase.execute({ playerId });
   }

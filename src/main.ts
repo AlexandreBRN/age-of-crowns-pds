@@ -4,30 +4,42 @@ import { InMemorySessionRepository } from './adapters/out/persistence/InMemorySe
 import { WebSocketEventPublisher, ClientRegistry } from './adapters/out/messaging/WebSocketEventPublisher';
 import { WebSocketAdapter } from './adapters/in/websocket/WebSocketAdapter';
 import { JoinSessionUseCase } from './core/application/use-cases/JoinSessionUseCase';
-import { MovePlayerUseCase } from './core/application/use-cases/MovePlayerUseCase';
 import { LeaveSessionUseCase } from './core/application/use-cases/LeaveSessionUseCase';
+import { MoveVillagerUseCase } from './core/application/use-cases/MoveVillagerUseCase';
+import { GatherResourceUseCase } from './core/application/use-cases/GatherResourceUseCase';
+import { TrainVillagerUseCase } from './core/application/use-cases/TrainVillagerUseCase';
+import { GameLoopService } from './core/application/services/GameLoopService';
 
 const PORT = Number(process.env.PORT ?? 3000);
 
-// --- Shared state (outbound adapter infrastructure) ---
+// --- Shared state ---
 const clientRegistry: ClientRegistry = new Map();
 
 // --- Output adapters ---
 const sessionRepository = new InMemorySessionRepository();
 const eventPublisher = new WebSocketEventPublisher(clientRegistry);
 
-// --- Use cases (application core) ---
-const joinSessionUseCase = new JoinSessionUseCase(sessionRepository, eventPublisher);
-const movePlayerUseCase = new MovePlayerUseCase(sessionRepository, eventPublisher);
-const leaveSessionUseCase = new LeaveSessionUseCase(sessionRepository, eventPublisher);
+// --- Application services ---
+const gameLoopService = new GameLoopService(sessionRepository, eventPublisher);
+
+// --- Use cases ---
+const joinSessionUseCase = new JoinSessionUseCase(sessionRepository);
+const leaveSessionUseCase = new LeaveSessionUseCase(sessionRepository);
+const moveVillagerUseCase = new MoveVillagerUseCase(sessionRepository);
+const gatherResourceUseCase = new GatherResourceUseCase(sessionRepository);
+const trainVillagerUseCase = new TrainVillagerUseCase(sessionRepository);
 
 // --- Input adapters ---
 const wsAdapter = new WebSocketAdapter(
   joinSessionUseCase,
-  movePlayerUseCase,
   leaveSessionUseCase,
+  moveVillagerUseCase,
+  gatherResourceUseCase,
+  trainVillagerUseCase,
   sessionRepository,
   clientRegistry,
+  eventPublisher,
+  gameLoopService,
 );
 
 // --- Infrastructure ---

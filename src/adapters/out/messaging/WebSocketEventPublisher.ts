@@ -1,46 +1,36 @@
 import WebSocket from 'ws';
 import { IEventPublisher } from '../../../core/application/ports/out/IEventPublisher';
 import { DomainEvent } from '../../../core/domain/events/DomainEvent';
-import { PlayerJoined } from '../../../core/domain/events/PlayerJoined';
-import { PlayerMoved } from '../../../core/domain/events/PlayerMoved';
-import { PlayerLeft } from '../../../core/domain/events/PlayerLeft';
+import { GameStateSnapshot } from '../../../core/domain/types/GameStateSnapshot';
 
 export type ClientRegistry = Map<string, Set<WebSocket>>;
 
 export class WebSocketEventPublisher implements IEventPublisher {
   constructor(private readonly registry: ClientRegistry) {}
 
+  publishStateSnapshot(sessionId: string, snapshot: GameStateSnapshot): void {
+    const clients = this.registry.get(sessionId);
+    if (!clients || clients.size === 0) return;
+    const payload = JSON.stringify({ type: 'state_update', snapshot });
+    clients.forEach((ws) => {
+      if (ws.readyState === WebSocket.OPEN) ws.send(payload);
+    });
+  }
+
   publishToSession(sessionId: string, events: DomainEvent[]): void {
     const clients = this.registry.get(sessionId);
     if (!clients || clients.size === 0) return;
-
     for (const event of events) {
-      const message = this.serialize(event);
-      if (!message) continue;
-
-      const payload = JSON.stringify(message);
-      clients.forEach((client) => {
-        if (client.readyState === WebSocket.OPEN) {
-          client.send(payload);
-        }
+      const payload = JSON.stringify({ type: event.type });
+      clients.forEach((ws) => {
+        if (ws.readyState === WebSocket.OPEN) ws.send(payload);
       });
     }
   }
 
-  private serialize(event: DomainEvent): object | null {
-    if (event instanceof PlayerJoined) {
-      return { type: 'player_joined', player: event.player.toJSON() };
+  sendTo(ws: WebSocket, data: object): void {
+    if (ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify(data));
     }
-    if (event instanceof PlayerMoved) {
-      return {
-        type: 'player_moved',
-        playerId: event.playerId.value,
-        position: event.newPosition.toJSON(),
-      };
-    }
-    if (event instanceof PlayerLeft) {
-      return { type: 'player_left', playerId: event.playerId.value };
-    }
-    return null;
   }
 }

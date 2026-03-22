@@ -3,122 +3,261 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Multiplayer Map</title>
+  <title>Age of Empires Multiplayer</title>
   <style>
-    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
 
     body {
-      background: #0d1117;
-      color: #e6edf3;
-      font-family: 'Segoe UI', monospace, sans-serif;
+      background: #1a1209;
+      color: #e8d5a0;
+      font-family: 'Georgia', serif;
+      height: 100vh;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+
+    /* Top HUD */
+    #hud {
+      background: linear-gradient(to bottom, #2a1a08, #1a1209);
+      border-bottom: 2px solid #5a3a10;
+      padding: 6px 12px;
+      display: flex;
+      align-items: center;
+      gap: 16px;
+      flex-shrink: 0;
+      font-size: 13px;
+    }
+
+    .hud-title {
+      font-size: 14px;
+      font-weight: bold;
+      color: #d4a830;
+      text-shadow: 0 1px 3px #000;
+      margin-right: 8px;
+    }
+
+    .resource-group {
+      display: flex;
+      align-items: center;
+      gap: 4px;
+    }
+
+    .resource-icon { font-size: 15px; }
+    .resource-value { color: #ffe080; min-width: 36px; font-weight: bold; }
+
+    #hud-status { margin-left: auto; color: #aaa; font-size: 12px; }
+
+    /* Game area */
+    #game-area {
+      display: flex;
+      flex: 1;
+      overflow: hidden;
+    }
+
+    #canvas-wrapper {
+      flex: 1;
+      overflow: hidden;
+      position: relative;
+    }
+
+    canvas {
+      display: block;
+      image-rendering: pixelated;
+      cursor: default;
+    }
+
+    /* Right panel */
+    #panel {
+      width: 190px;
+      background: linear-gradient(to bottom, #2a1a08, #1a1209);
+      border-left: 2px solid #5a3a10;
+      display: flex;
+      flex-direction: column;
+      padding: 8px;
+      gap: 8px;
+      flex-shrink: 0;
+      overflow-y: auto;
+    }
+
+    .panel-section {
+      background: rgba(0,0,0,0.35);
+      border: 1px solid #5a3a10;
+      border-radius: 3px;
+      padding: 7px;
+    }
+
+    .panel-title {
+      color: #d4a830;
+      font-size: 11px;
+      font-weight: bold;
+      margin-bottom: 5px;
+      border-bottom: 1px solid #4a2a08;
+      padding-bottom: 3px;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+    }
+
+    #selection-info {
+      font-size: 11px;
+      color: #c8b080;
+      min-height: 50px;
+      line-height: 1.5;
+    }
+
+    .action-btn {
+      width: 100%;
+      padding: 6px 8px;
+      background: linear-gradient(to bottom, #5a3a10, #3a2008);
+      color: #e8d5a0;
+      border: 1px solid #7a4a18;
+      border-radius: 3px;
+      cursor: pointer;
+      font-family: 'Georgia', serif;
+      font-size: 11px;
+      text-align: left;
+      margin-bottom: 4px;
+      line-height: 1.4;
+    }
+
+    .action-btn:hover:not(:disabled) {
+      background: linear-gradient(to bottom, #7a5020, #5a3a10);
+      border-color: #d4a830;
+    }
+
+    .action-btn:disabled { opacity: 0.35; cursor: not-allowed; }
+    .action-btn .cost { color: #998860; font-size: 10px; }
+
+    #legend {
+      font-size: 10px;
+      color: #7a6040;
+      margin-top: auto;
+      border-top: 1px solid #3a2008;
+      padding-top: 6px;
+      line-height: 1.7;
+    }
+
+    /* Lobby */
+    #lobby {
+      position: fixed;
+      inset: 0;
+      background: rgba(8, 5, 2, 0.96);
       display: flex;
       flex-direction: column;
       align-items: center;
       justify-content: center;
-      min-height: 100vh;
-      gap: 20px;
+      gap: 18px;
+      z-index: 100;
     }
 
-    h1 {
-      font-size: 1.6rem;
-      letter-spacing: 0.1em;
-      color: #58a6ff;
+    #lobby h1 {
+      font-size: 2.4rem;
+      color: #d4a830;
+      text-shadow: 0 0 20px rgba(212,168,48,0.4);
     }
 
-    #lobby {
-      display: flex;
-      flex-direction: column;
-      align-items: center;
-      gap: 14px;
-    }
+    #lobby p { color: #c8b080; font-size: 0.9rem; }
 
-    #game {
-      display: none;
-      flex-direction: column;
-      align-items: center;
-      gap: 12px;
-    }
-
-    input {
-      padding: 10px 14px;
-      background: #161b22;
-      border: 1px solid #30363d;
-      border-radius: 6px;
-      color: #e6edf3;
+    #lobby input {
+      padding: 10px 16px;
+      background: #1a1005;
+      border: 1px solid #7a4a18;
+      color: #e8d5a0;
+      border-radius: 4px;
       font-size: 1rem;
-      width: 220px;
-      outline: none;
-      transition: border-color 0.2s;
+      font-family: 'Georgia', serif;
+      width: 260px;
     }
 
-    input:focus { border-color: #58a6ff; }
+    #lobby input:focus { outline: none; border-color: #d4a830; }
 
-    button {
-      padding: 10px 28px;
-      background: #238636;
-      color: #fff;
-      border: none;
-      border-radius: 6px;
-      font-size: 1rem;
+    #join-btn {
+      padding: 11px 36px;
+      background: linear-gradient(to bottom, #8a5a20, #5a3a10);
+      color: #e8d5a0;
+      border: 1px solid #d4a830;
+      border-radius: 4px;
       cursor: pointer;
-      transition: background 0.2s;
+      font-family: 'Georgia', serif;
+      font-size: 1rem;
     }
 
-    button:hover { background: #2ea043; }
-    button:disabled { background: #21262d; color: #8b949e; cursor: not-allowed; }
+    #join-btn:hover { background: linear-gradient(to bottom, #b07030, #8a5a20); }
+    #join-btn:disabled { opacity: 0.4; cursor: not-allowed; }
 
-    canvas {
-      border: 2px solid #30363d;
-      border-radius: 6px;
-      display: block;
-      image-rendering: pixelated;
+    #lobby-status { color: #7a6040; font-size: 0.85rem; }
+
+    /* Waiting */
+    #waiting-overlay {
+      position: fixed;
+      top: 44px;
+      left: 50%;
+      transform: translateX(-50%);
+      background: rgba(8,5,2,0.9);
+      border: 1px solid #7a4a18;
+      padding: 10px 22px;
+      border-radius: 4px;
+      color: #d4a830;
+      font-size: 13px;
+      z-index: 50;
+      display: none;
     }
-
-    .info {
-      font-size: 0.8rem;
-      color: #8b949e;
-      text-align: center;
-      line-height: 1.6;
-    }
-
-    #status { color: #8b949e; font-size: 0.85rem; }
-
-    .legend {
-      display: flex;
-      gap: 16px;
-      font-size: 0.78rem;
-      color: #8b949e;
-    }
-
-    .legend span::before {
-      content: '●';
-      margin-right: 4px;
-    }
-
-    .legend .me::before { color: #f78166; }
-    .legend .other::before { color: #58a6ff; }
   </style>
 </head>
 <body>
-  <h1>Multiplayer Map</h1>
 
+  <!-- Top HUD -->
+  <div id="hud">
+    <span class="hud-title">⚔ Age of Empires</span>
+    <span class="resource-group"><span class="resource-icon">🪙</span><span class="resource-value" id="res-gold">200</span></span>
+    <span class="resource-group"><span class="resource-icon">🪵</span><span class="resource-value" id="res-wood">200</span></span>
+    <span class="resource-group"><span class="resource-icon">🪨</span><span class="resource-value" id="res-stone">0</span></span>
+    <span class="resource-group"><span class="resource-icon">🍖</span><span class="resource-value" id="res-food">100</span></span>
+    <span id="hud-status">–</span>
+  </div>
+
+  <!-- Game area -->
+  <div id="game-area">
+    <div id="canvas-wrapper">
+      <canvas id="canvas"></canvas>
+    </div>
+
+    <div id="panel">
+      <div class="panel-section">
+        <div class="panel-title">Seleção</div>
+        <div id="selection-info">Clique num aldeão para selecionar.</div>
+      </div>
+
+      <div class="panel-section">
+        <div class="panel-title">Centro de Cidade</div>
+        <button class="action-btn" id="btn-train" disabled>
+          Treinar Aldeão<br><span class="cost">🍖 50 comida · 5 seg</span>
+        </button>
+        <div id="train-status" style="font-size:10px;color:#7a6040;"></div>
+      </div>
+
+      <div id="legend">
+        <div>🖱 Esq: selecionar</div>
+        <div>🖱 Dir: mover / coletar</div>
+        <div>WASD: câmera</div>
+        <div style="margin-top:4px">🟡 Ouro &nbsp;🔘 Pedra</div>
+        <div>🌲 Madeira &nbsp;🦌 Veado</div>
+        <div>🫐 Frutas</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Lobby -->
   <div id="lobby">
-    <input id="nameInput" type="text" placeholder="Seu nome" maxlength="16" autocomplete="off" />
-    <button id="joinBtn" disabled>Entrar</button>
-    <span id="status">Conectando…</span>
+    <h1>⚔ Age of Empires</h1>
+    <p>Estratégia medieval multijogador — 2 jogadores</p>
+    <input id="name-input" type="text" placeholder="Seu nome de guerreiro..." maxlength="20" />
+    <button id="join-btn" disabled>Entrar na Batalha</button>
+    <span id="lobby-status">Conectando ao servidor...</span>
   </div>
 
-  <div id="game">
-    <canvas id="canvas"></canvas>
-    <div class="legend">
-      <span class="me">Você</span>
-      <span class="other">Outro jogador</span>
-    </div>
-    <div class="info">
-      Mover: <strong>WASD</strong> ou <strong>↑ ↓ ← →</strong><br />
-      <span id="playerCount">Aguardando jogadores…</span>
-    </div>
-  </div>
+  <!-- Waiting overlay -->
+  <div id="waiting-overlay">⏳ Aguardando o segundo jogador...</div>
 
   <script src="game.js"></script>
 </body>

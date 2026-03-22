@@ -1,32 +1,21 @@
 import { IJoinSessionUseCase, JoinSessionCommand, JoinSessionResult } from '../ports/in/IJoinSessionUseCase';
 import { ISessionRepository } from '../ports/out/ISessionRepository';
-import { IEventPublisher } from '../ports/out/IEventPublisher';
-import { Player } from '../../domain/entities/Player';
-import { PlayerId } from '../../domain/value-objects/PlayerId';
+import { v4 as uuidv4 } from 'uuid';
 
 export class JoinSessionUseCase implements IJoinSessionUseCase {
-  constructor(
-    private readonly sessionRepository: ISessionRepository,
-    private readonly eventPublisher: IEventPublisher,
-  ) {}
+  constructor(private readonly sessionRepository: ISessionRepository) {}
 
   execute(command: JoinSessionCommand): JoinSessionResult {
     const session = this.sessionRepository.findDefault();
 
     if (session.isFull) {
-      throw new Error('Session is full — max 2 players');
+      throw new Error('Sessão cheia — máximo 2 jogadores');
     }
 
-    const playerId = PlayerId.generate();
-    const spawnPosition = session.getSpawnPosition();
-    const player = new Player(playerId, command.playerName, spawnPosition);
-
-    session.addPlayer(player);
+    const playerId = uuidv4();
+    session.addPlayer(playerId, command.playerName);
     this.sessionRepository.save(session);
 
-    const events = session.pullEvents();
-    this.eventPublisher.publishToSession(session.id, events);
-
-    return { playerId: playerId.value, sessionId: session.id };
+    return { playerId, sessionId: session.id };
   }
 }
