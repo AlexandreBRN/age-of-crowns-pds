@@ -8,7 +8,7 @@ export class InMemorySessionRepository implements ISessionRepository {
   private readonly sessions: Map<string, GameSession> = new Map();
 
   constructor() {
-    const map = MapGeneratorService.generate(40, 40);
+    const map = MapGeneratorService.generate(100, 100);
     const session = new GameSession(DEFAULT_SESSION_ID, map.tiles, map.resourceNodes);
     this.sessions.set(DEFAULT_SESSION_ID, session);
     console.log(`[Mapa] Gerado com ${map.resourceNodes.length} nós de recursos`);

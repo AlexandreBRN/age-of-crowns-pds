@@ -9,6 +9,7 @@ export class HttpServer {
   constructor(private readonly port: number) {
     this.httpServer = createServer(this.app);
     this.app.use(express.static(path.join(__dirname, '../../../public')));
+    this.app.use('/assets', express.static(path.join(__dirname, '../../../src/assets')));
   }
 
   start(): void {

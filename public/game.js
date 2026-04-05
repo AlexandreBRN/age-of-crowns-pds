@@ -1,6 +1,8 @@
 // ─── Constants ────────────────────────────────────────────────────────────────
-const TILE = 20;   // pixels per tile (40x40 map = 800x800 total)
-const MAP_SIZE = 40;
+const TILE = 32;  // pixels per tile
+
+const VISION_VILLAGER   = 5;   // tiles
+const VISION_TOWN_CENTER = 9;  // tiles
 
 const COLORS = {
   tiles: {
@@ -15,12 +17,22 @@ const COLORS = {
     food_deer:  '#c87840',
     food_berry: '#7a3a8a',
   },
-  tc: ['#c0392b', '#1a6aaa'],       // Town Center colors per player index
-  villager: ['#e05040', '#3080c0'], // Villager fill colors per player index
+  tc:       ['#c0392b', '#1a6aaa'],
+  villager: ['#e05040', '#3080c0'],
   selected: '#f0d040',
-  selectionRing: 'rgba(240,208,64,0.5)',
-  moveTarget: 'rgba(240,208,64,0.4)',
+  moveTarget:   'rgba(240,208,64,0.4)',
   gatherTarget: 'rgba(80,200,80,0.4)',
+  fogUnexplored: 'rgba(0,0,0,1)',
+  fogShroud:     'rgba(0,0,0,0.55)',
+};
+
+// Sprite paths — exact filenames as found in assets folder
+const SPRITE_PATHS = {
+  idle:          '/assets/aldeao/iddle.gif',
+  running_right: '/assets/aldeao/runnig_right.gif',  // typo in source file
+  running_down:  '/assets/aldeao/running_down.gif',
+  running_left:  '/assets/aldeao/running_left.gif',
+  running_up:    '/assets/aldeao/running_up.gif',
 };
 
 // ─── State ────────────────────────────────────────────────────────────────────
@@ -28,12 +40,23 @@ const G = {
   ws: null,
   playerId: null,
   sessionId: null,
-  myPlayerIndex: 0,  // 0 = first player, 1 = second
-  snapshot: null,    // latest GameStateSnapshot
-  mapTiles: null,    // TileType[][] — cached once
+  myPlayerIndex: -1,
+  snapshot: null,
+  mapTiles: null,      // TileType[][]
   selectedIds: new Set(),
 
-  // Camera (tile offset)
+  // Fog of war (client-side, per player)
+  revealedTiles: new Set(),  // "x,y" keys — ever seen
+  visibleTiles:  new Set(),  // "x,y" keys — currently in vision
+
+  // Minimap
+  minimapCanvas: null,      // offscreen canvas: static tile layer
+  minimapFogCanvas: null,   // offscreen canvas: fog layer (rebuilt on fog change)
+  minimapEl: null,          // the #minimap-canvas DOM element
+  minimapCtx: null,
+  isDraggingMinimap: false,
+
+  // Camera in tile coordinates (float)
   camX: 0,
   camY: 0,
   keysHeld: {},
@@ -42,7 +65,42 @@ const G = {
   ctx: null,
   wrapper: null,
   animFrameId: null,
+
+  sprites: {},           // loaded Image objects
+  spritesReady: false,
 };
+
+// ─── Sprite loading ───────────────────────────────────────────────────────────
+function loadSprites() {
+  // Container kept visible off-screen so GIF animations keep running
+  const container = document.createElement('div');
+  container.style.cssText = 'position:fixed;left:-9999px;top:0;width:1px;height:1px;overflow:hidden;';
+  document.body.appendChild(container);
+
+  let loaded = 0;
+  const total = Object.keys(SPRITE_PATHS).length;
+
+  for (const [name, src] of Object.entries(SPRITE_PATHS)) {
+    const img = new Image();
+    img.onload = () => {
+      loaded++;
+      if (loaded === total) G.spritesReady = true;
+    };
+    img.onerror = () => { loaded++; }; // fallback to shapes if missing
+    img.src = src;
+    container.appendChild(img);  // must be in DOM for GIF to animate
+    G.sprites[name] = img;
+  }
+}
+
+function spriteForVillager(v) {
+  if (v.state !== 'moving' || !v.moveTarget) return G.sprites.idle;
+  const dx = v.moveTarget.x - v.position.x;
+  const dy = v.moveTarget.y - v.position.y;
+  // Horizontal movement takes priority (matches server movement algorithm)
+  if (dx !== 0) return dx > 0 ? G.sprites.running_right : G.sprites.running_left;
+  return dy > 0 ? G.sprites.running_down : G.sprites.running_up;
+}
 
 // ─── WebSocket ────────────────────────────────────────────────────────────────
 function connect() {
@@ -65,9 +123,7 @@ function connect() {
 }
 
 function send(payload) {
-  if (G.ws?.readyState === WebSocket.OPEN) {
-    G.ws.send(JSON.stringify(payload));
-  }
+  if (G.ws?.readyState === WebSocket.OPEN) G.ws.send(JSON.stringify(payload));
 }
 
 // ─── Message Handlers ─────────────────────────────────────────────────────────
@@ -76,10 +132,15 @@ function handleMessage(msg) {
     case 'game_joined':
       G.playerId  = msg.playerId;
       G.sessionId = msg.sessionId;
-      if (msg.mapTiles) G.mapTiles = msg.mapTiles;
+      if (msg.mapTiles) {
+        G.mapTiles = msg.mapTiles;
+        buildMinimapBase();
+      }
       if (msg.initialSnapshot) {
         G.snapshot = msg.initialSnapshot;
         G.myPlayerIndex = G.snapshot.players.findIndex(p => p.id === G.playerId);
+        revealAroundBases();
+        buildMinimapFog();
       }
       hideLobby();
       if (msg.waitingForOpponent) showWaiting();
@@ -98,6 +159,7 @@ function handleMessage(msg) {
     case 'state_update':
       G.snapshot = msg.snapshot;
       G.myPlayerIndex = G.snapshot.players.findIndex(p => p.id === G.playerId);
+      updateFogOfWar();
       updateHUD();
       updatePanel();
       break;
@@ -109,15 +171,85 @@ function handleMessage(msg) {
   }
 }
 
-// ─── Camera loop ─────────────────────────────────────────────────────────────
-const CAM_SPEED = 0.3; // tiles per frame at 60fps
+// ─── Fog of War ───────────────────────────────────────────────────────────────
+function revealAroundBases() {
+  if (!G.snapshot || !G.playerId) return;
+  for (const tc of G.snapshot.townCenters) {
+    if (tc.ownerId !== G.playerId) continue;
+    addVisionCircle(G.revealedTiles, tc.anchorPosition.x + 1, tc.anchorPosition.y + 1, VISION_TOWN_CENTER);
+  }
+  for (const v of G.snapshot.villagers) {
+    if (v.ownerId !== G.playerId) continue;
+    addVisionCircle(G.revealedTiles, v.position.x, v.position.y, VISION_VILLAGER);
+  }
+}
+
+function updateFogOfWar() {
+  if (!G.snapshot || !G.playerId || !G.mapTiles) return;
+
+  const newVisible = new Set();
+  const mh = G.mapTiles.length;
+  const mw = G.mapTiles[0]?.length ?? 0;
+
+  // Town Centers
+  for (const tc of G.snapshot.townCenters) {
+    if (tc.ownerId !== G.playerId) continue;
+    const cx = tc.anchorPosition.x + 1;
+    const cy = tc.anchorPosition.y + 1;
+    addVisionCircle(newVisible, cx, cy, VISION_TOWN_CENTER, mw, mh);
+  }
+
+  // Villagers
+  for (const v of G.snapshot.villagers) {
+    if (v.ownerId !== G.playerId) continue;
+    addVisionCircle(newVisible, v.position.x, v.position.y, VISION_VILLAGER, mw, mh);
+  }
+
+  G.visibleTiles = newVisible;
+
+  // Accumulate into revealed
+  for (const key of newVisible) {
+    G.revealedTiles.add(key);
+  }
+
+  // Rebuild minimap fog layer
+  buildMinimapFog();
+}
+
+function addVisionCircle(set, cx, cy, radius, mw, mh) {
+  const maxW = mw ?? 100;
+  const maxH = mh ?? 100;
+  const r2 = radius * radius;
+  for (let dy = -radius; dy <= radius; dy++) {
+    for (let dx = -radius; dx <= radius; dx++) {
+      if (dx * dx + dy * dy <= r2) {
+        const tx = cx + dx;
+        const ty = cy + dy;
+        if (tx >= 0 && tx < maxW && ty >= 0 && ty < maxH) {
+          set.add(`${tx},${ty}`);
+        }
+      }
+    }
+  }
+}
+
+function isTileVisible(tx, ty)  { return G.visibleTiles.has(`${tx},${ty}`); }
+function isTileRevealed(tx, ty) { return G.revealedTiles.has(`${tx},${ty}`); }
+
+// ─── Camera / Game Loop ───────────────────────────────────────────────────────
+const CAM_SPEED = 0.25;
+
+function mapWidth()  { return G.mapTiles?.[0]?.length ?? 100; }
+function mapHeight() { return G.mapTiles?.length        ?? 100; }
+function visibleTilesX() { return Math.ceil((G.canvas?.width  ?? 800) / TILE) + 1; }
+function visibleTilesY() { return Math.ceil((G.canvas?.height ?? 600) / TILE) + 1; }
 
 function gameLoop() {
   G.animFrameId = requestAnimationFrame(gameLoop);
 
-  // Camera movement
-  const maxCamX = MAP_SIZE - visibleTilesX();
-  const maxCamY = MAP_SIZE - visibleTilesY();
+  // Camera panning
+  const maxCamX = Math.max(0, mapWidth()  - visibleTilesX());
+  const maxCamY = Math.max(0, mapHeight() - visibleTilesY());
   if (G.keysHeld['a'] || G.keysHeld['ArrowLeft'])  G.camX = Math.max(0, G.camX - CAM_SPEED);
   if (G.keysHeld['d'] || G.keysHeld['ArrowRight']) G.camX = Math.min(maxCamX, G.camX + CAM_SPEED);
   if (G.keysHeld['w'] || G.keysHeld['ArrowUp'])    G.camY = Math.max(0, G.camY - CAM_SPEED);
@@ -126,12 +258,9 @@ function gameLoop() {
   render();
 }
 
-function visibleTilesX() { return Math.ceil((G.canvas?.width ?? 800) / TILE); }
-function visibleTilesY() { return Math.ceil((G.canvas?.height ?? 600) / TILE); }
-
 // ─── Rendering ────────────────────────────────────────────────────────────────
 function render() {
-  const { ctx, canvas, snapshot, mapTiles } = G;
+  const { ctx, canvas, snapshot } = G;
   if (!ctx || !canvas) return;
 
   ctx.clearRect(0, 0, canvas.width, canvas.height);
@@ -142,7 +271,8 @@ function render() {
   const subY  = (G.camY - camTY) * TILE;
 
   ctx.save();
-  ctx.translate(-subX, -subY);
+  // Translate by full camera position in pixels (world → screen space)
+  ctx.translate(-camTX * TILE - subX, -camTY * TILE - subY);
 
   renderTiles(camTX, camTY);
 
@@ -152,308 +282,202 @@ function render() {
     renderVillagers(snapshot, camTX, camTY);
   }
 
+  renderFog(camTX, camTY);
+
   ctx.restore();
+
+  renderMinimap();
 }
 
-// Tile rendering with medieval palette and slight variation
+// ── Tiles ────────────────────────────────────────────────────────────────────
 function renderTiles(camTX, camTY) {
-  const { ctx, canvas, mapTiles } = G;
+  const { ctx, mapTiles } = G;
+  const vx = visibleTilesX() + 1;
+  const vy = visibleTilesY() + 1;
+
   if (!mapTiles) {
-    // Placeholder while waiting for map
-    ctx.fillStyle = '#2a4030';
-    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.fillStyle = '#1a2010';
+    ctx.fillRect(0, 0, G.canvas.width + TILE, G.canvas.height + TILE);
     return;
   }
-  const vx = visibleTilesX() + 2;
-  const vy = visibleTilesY() + 2;
 
   for (let dy = 0; dy < vy; dy++) {
-    const y = camTY + dy;
-    if (y < 0 || y >= MAP_SIZE) continue;
+    const ty = camTY + dy;
+    if (ty < 0 || ty >= mapHeight()) continue;
     for (let dx = 0; dx < vx; dx++) {
-      const x = camTX + dx;
-      if (x < 0 || x >= MAP_SIZE) continue;
-      const tile = mapTiles[y]?.[x] ?? 'grass';
-      const px = x * TILE;
-      const py = y * TILE;
+      const tx = camTX + dx;
+      if (tx < 0 || tx >= mapWidth()) continue;
+
+      const px = tx * TILE;
+      const py = ty * TILE;
+      const tile = mapTiles[ty]?.[tx] ?? 'grass';
 
       if (tile === 'water') {
-        drawWater(ctx, px, py);
+        drawWater(ctx, px, py, tx, ty);
       } else if (tile === 'dirt') {
-        const shade = COLORS.tiles.dirt[(x + y * 3) % 4];
-        ctx.fillStyle = shade;
+        ctx.fillStyle = COLORS.tiles.dirt[(tx + ty * 3) % 4];
         ctx.fillRect(px, py, TILE, TILE);
-        // Pebble texture
         ctx.fillStyle = 'rgba(0,0,0,0.08)';
-        ctx.fillRect(px + 3, py + 3, 3, 3);
-        ctx.fillRect(px + TILE - 6, py + TILE - 6, 2, 2);
+        ctx.fillRect(px + 4, py + 4, 3, 3);
+        ctx.fillRect(px + TILE - 7, py + TILE - 7, 2, 2);
       } else {
-        // grass
-        const shade = COLORS.tiles.grass[(x * 2 + y) % 4];
-        ctx.fillStyle = shade;
+        ctx.fillStyle = COLORS.tiles.grass[(tx * 2 + ty) % 4];
         ctx.fillRect(px, py, TILE, TILE);
-        // Subtle grass texture
+        // Subtle grass detail
         ctx.fillStyle = 'rgba(0,0,0,0.05)';
-        if ((x + y) % 3 === 0) ctx.fillRect(px + 5, py + 2, 2, 4);
-        if ((x * y) % 5 === 0) ctx.fillRect(px + TILE - 5, py + TILE - 5, 2, 3);
+        if ((tx + ty) % 3 === 0) ctx.fillRect(px + 6, py + 3, 2, 5);
+        if ((tx * ty) % 5 === 0) ctx.fillRect(px + TILE - 6, py + TILE - 6, 2, 4);
       }
     }
   }
 }
 
-function drawWater(ctx, px, py) {
-  // Animated water (simple gradient)
-  const t = Date.now() / 2000;
-  const wave = Math.sin(t + px * 0.05 + py * 0.07) * 0.05;
-  const r = Math.round(30 + wave * 20);
-  const g2 = Math.round(58 + wave * 20);
-  const b = 95 + Math.round(wave * 20);
-  ctx.fillStyle = `rgb(${r},${g2},${b})`;
+function drawWater(ctx, px, py, tx, ty) {
+  const t = Date.now() / 2500;
+  const wave = Math.sin(t + tx * 0.08 + ty * 0.06) * 10;
+  const b = Math.round(90 + wave);
+  ctx.fillStyle = `rgb(25,55,${b})`;
   ctx.fillRect(px, py, TILE, TILE);
-  // Water sheen
   ctx.fillStyle = 'rgba(255,255,255,0.06)';
-  ctx.fillRect(px + 2, py + TILE / 2, TILE - 4, 2);
+  ctx.fillRect(px + 3, py + TILE / 2, TILE - 6, 2);
 }
 
-// Resource nodes — each type has its own drawing
+// ── Resources ────────────────────────────────────────────────────────────────
 function renderResourceNodes(snapshot, camTX, camTY) {
   const { ctx } = G;
   for (const node of snapshot.resourceNodes) {
-    const px = node.position.x * TILE;
-    const py = node.position.y * TILE;
-    if (!isInView(node.position.x, node.position.y, camTX, camTY)) continue;
+    const tx = node.position.x;
+    const ty = node.position.y;
+    if (!isInView(tx, ty, camTX, camTY)) continue;
+    // Show resource if tile was ever revealed (last-known-state behavior)
+    if (!isTileRevealed(tx, ty)) continue;
 
+    const px = tx * TILE;
+    const py = ty * TILE;
     const cx = px + TILE / 2;
     const cy = py + TILE / 2;
 
     switch (node.type) {
-      case 'gold':       drawGoldMine(ctx, cx, cy); break;
+      case 'gold':       drawGoldMine(ctx, cx, cy);   break;
       case 'stone':      drawStoneQuarry(ctx, cx, cy); break;
-      case 'wood':       drawTree(ctx, cx, cy); break;
-      case 'food_deer':  drawDeer(ctx, cx, cy); break;
-      case 'food_berry': drawBerryBush(ctx, cx, cy); break;
+      case 'wood':       drawTree(ctx, cx, cy);        break;
+      case 'food_deer':  drawDeer(ctx, cx, cy);        break;
+      case 'food_berry': drawBerryBush(ctx, cx, cy);   break;
     }
 
-    // Amount bar
+    // Remaining amount bar
     const maxAmt = { gold: 600, stone: 500, wood: 400, food_deer: 300, food_berry: 250 };
     const pct = node.remaining / (maxAmt[node.type] ?? 500);
-    ctx.fillStyle = 'rgba(0,0,0,0.5)';
-    ctx.fillRect(px + 1, py + TILE - 4, TILE - 2, 3);
+    ctx.fillStyle = 'rgba(0,0,0,0.55)';
+    ctx.fillRect(px + 1, py + TILE - 5, TILE - 2, 4);
     ctx.fillStyle = pct > 0.5 ? '#60d040' : pct > 0.2 ? '#d0a040' : '#d04040';
-    ctx.fillRect(px + 1, py + TILE - 4, Math.round((TILE - 2) * pct), 3);
+    ctx.fillRect(px + 1, py + TILE - 5, Math.round((TILE - 2) * pct), 4);
   }
 }
 
-function drawGoldMine(ctx, cx, cy) {
-  // Gold pile — rotated squares
-  ctx.fillStyle = '#b8900a';
-  ctx.fillRect(cx - 6, cy - 6, 11, 11);
-  ctx.fillStyle = '#e8c040';
-  ctx.fillRect(cx - 4, cy - 4, 7, 7);
-  ctx.fillStyle = '#ffd060';
-  ctx.fillRect(cx - 2, cy - 6, 4, 4);
-  ctx.fillRect(cx + 2, cy, 4, 4);
-  ctx.fillRect(cx - 6, cy + 1, 4, 4);
-  // Glint
-  ctx.fillStyle = 'rgba(255,255,200,0.6)';
-  ctx.fillRect(cx - 3, cy - 5, 2, 2);
-}
-
-function drawStoneQuarry(ctx, cx, cy) {
-  ctx.fillStyle = '#6a6a6a';
-  ctx.beginPath();
-  ctx.arc(cx, cy + 2, 6, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.fillStyle = '#8a8a8a';
-  ctx.beginPath();
-  ctx.arc(cx - 3, cy - 2, 5, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.fillStyle = '#aaaaaa';
-  ctx.beginPath();
-  ctx.arc(cx + 3, cy - 3, 4, 0, Math.PI * 2);
-  ctx.fill();
-  // Crack
-  ctx.strokeStyle = '#444';
-  ctx.lineWidth = 1;
-  ctx.beginPath();
-  ctx.moveTo(cx - 1, cy - 5);
-  ctx.lineTo(cx + 2, cy + 2);
-  ctx.stroke();
-}
-
-function drawTree(ctx, cx, cy) {
-  // Trunk
-  ctx.fillStyle = '#5a3a10';
-  ctx.fillRect(cx - 2, cy + 2, 4, 6);
-  // Foliage layers
-  ctx.fillStyle = '#1a5a1a';
-  ctx.beginPath();
-  ctx.moveTo(cx, cy - 9);
-  ctx.lineTo(cx + 7, cy + 4);
-  ctx.lineTo(cx - 7, cy + 4);
-  ctx.closePath();
-  ctx.fill();
-  ctx.fillStyle = '#2a7a2a';
-  ctx.beginPath();
-  ctx.moveTo(cx, cy - 6);
-  ctx.lineTo(cx + 5, cy + 3);
-  ctx.lineTo(cx - 5, cy + 3);
-  ctx.closePath();
-  ctx.fill();
-  // Highlight
-  ctx.fillStyle = 'rgba(100,200,80,0.3)';
-  ctx.beginPath();
-  ctx.arc(cx - 1, cy - 4, 3, 0, Math.PI * 2);
-  ctx.fill();
-}
-
-function drawDeer(ctx, cx, cy) {
-  // Body
-  ctx.fillStyle = '#a06030';
-  ctx.beginPath();
-  ctx.ellipse(cx, cy + 2, 6, 4, 0, 0, Math.PI * 2);
-  ctx.fill();
-  // Neck + head
-  ctx.fillStyle = '#b07040';
-  ctx.fillRect(cx + 2, cy - 2, 3, 5);
-  ctx.beginPath();
-  ctx.arc(cx + 4, cy - 3, 3, 0, Math.PI * 2);
-  ctx.fill();
-  // Antler
-  ctx.strokeStyle = '#804020';
-  ctx.lineWidth = 1.2;
-  ctx.beginPath(); ctx.moveTo(cx + 5, cy - 5); ctx.lineTo(cx + 3, cy - 9); ctx.stroke();
-  ctx.beginPath(); ctx.moveTo(cx + 5, cy - 5); ctx.lineTo(cx + 7, cy - 8); ctx.stroke();
-  ctx.beginPath(); ctx.moveTo(cx + 3, cy - 7); ctx.lineTo(cx + 5, cy - 9); ctx.stroke();
-  // Legs
-  ctx.fillStyle = '#804020';
-  ctx.fillRect(cx - 4, cy + 5, 2, 4);
-  ctx.fillRect(cx - 1, cy + 5, 2, 4);
-  ctx.fillRect(cx + 2, cy + 5, 2, 4);
-  ctx.fillRect(cx + 5, cy + 5, 2, 4);
-}
-
-function drawBerryBush(ctx, cx, cy) {
-  // Bush foliage
-  ctx.fillStyle = '#2a5a1a';
-  ctx.beginPath();
-  ctx.arc(cx, cy, 7, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.fillStyle = '#3a6a28';
-  ctx.beginPath();
-  ctx.arc(cx - 3, cy - 2, 5, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.beginPath();
-  ctx.arc(cx + 3, cy - 3, 4, 0, Math.PI * 2);
-  ctx.fill();
-  // Berries
-  const berries = [[-3,1],[0,-2],[3,0],[1,3],[-2,3],[-1,-4]];
-  for (const [bx, by] of berries) {
-    ctx.fillStyle = '#c03070';
-    ctx.beginPath();
-    ctx.arc(cx + bx, cy + by, 2, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.fillStyle = '#e04090';
-    ctx.beginPath();
-    ctx.arc(cx + bx - 0.5, cy + by - 0.5, 1, 0, Math.PI * 2);
-    ctx.fill();
-  }
-}
-
+// ── Town Centers ─────────────────────────────────────────────────────────────
 function renderTownCenters(snapshot, camTX, camTY) {
   const { ctx } = G;
   for (const tc of snapshot.townCenters) {
-    const px = tc.anchorPosition.x * TILE;
-    const py = tc.anchorPosition.y * TILE;
-    if (!isInView(tc.anchorPosition.x, tc.anchorPosition.y, camTX, camTY)) continue;
+    const ax = tc.anchorPosition.x;
+    const ay = tc.anchorPosition.y;
+    // Enemy TC: hide if never revealed; show even in shroud (buildings are permanent)
+    const isOwn = tc.ownerId === G.playerId;
+    if (!isOwn && !isTileRevealed(ax + 1, ay + 1)) continue;
+    if (!isInView(ax, ay, camTX, camTY)) continue;
 
+    const px = ax * TILE;
+    const py = ay * TILE;
     const playerIdx = snapshot.players.findIndex(p => p.id === tc.ownerId);
     const color = COLORS.tc[playerIdx] ?? '#888';
 
     // Shadow
     ctx.fillStyle = 'rgba(0,0,0,0.3)';
-    ctx.fillRect(px + 4, py + 4, TILE * 3, TILE * 3);
+    ctx.fillRect(px + 5, py + 5, TILE * 3, TILE * 3);
 
-    // Stone wall base
+    // Stone wall
     ctx.fillStyle = '#6a5040';
     ctx.fillRect(px, py, TILE * 3, TILE * 3);
 
-    // Wall texture — crenellations
+    // Wall texture
     ctx.fillStyle = '#7a6050';
     for (let i = 0; i < 3; i++) {
-      ctx.fillRect(px + i * TILE + 2, py + 2, TILE - 6, TILE - 4);
-      ctx.fillRect(px + i * TILE + 2, py + TILE * 2 + 4, TILE - 6, TILE - 6);
+      ctx.fillRect(px + i * TILE + 3, py + 3, TILE - 7, TILE - 5);
+      ctx.fillRect(px + i * TILE + 3, py + TILE * 2 + 5, TILE - 7, TILE - 7);
     }
 
     // Central keep
     ctx.fillStyle = '#5a4030';
-    ctx.fillRect(px + 4, py + 4, TILE * 3 - 8, TILE * 3 - 8);
+    ctx.fillRect(px + 5, py + 5, TILE * 3 - 10, TILE * 3 - 10);
 
-    // Roof / top
+    // Colored roof
     ctx.fillStyle = color;
     ctx.globalAlpha = 0.7;
-    ctx.fillRect(px + 6, py + 6, TILE * 3 - 12, TILE * 3 - 12);
+    ctx.fillRect(px + 8, py + 8, TILE * 3 - 16, TILE * 3 - 16);
     ctx.globalAlpha = 1;
 
-    // Banner flag
+    // Flag
     ctx.fillStyle = color;
-    ctx.fillRect(px + TILE + 8, py - 6, 2, 10);
-    ctx.fillRect(px + TILE + 10, py - 6, 8, 6);
+    ctx.fillRect(px + TILE + 10, py - 8, 2, 12);
+    ctx.fillRect(px + TILE + 12, py - 8, 9, 7);
 
     // Door
     ctx.fillStyle = '#3a2810';
-    ctx.fillRect(px + TILE + 5, py + TILE * 2, 8, 10);
+    ctx.fillRect(px + TILE + 6, py + TILE * 2 + 1, 8, 12);
 
-    // Player label
+    // Name
     const pName = snapshot.players[playerIdx]?.name ?? '';
     ctx.fillStyle = '#fff';
     ctx.font = 'bold 9px Georgia';
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
-    ctx.fillText(pName.substring(0, 8), px + TILE * 1.5, py + TILE * 1.5);
+    ctx.fillText(pName.substring(0, 9), px + TILE * 1.5, py + TILE * 1.5);
 
-    // Training progress bar
-    if (tc.isTraining) {
-      const pct = 1 - (tc.trainTicksRemaining / 20);
+    // Training progress
+    if (tc.isTraining && isOwn) {
+      const pct = 1 - tc.trainTicksRemaining / 20;
       ctx.fillStyle = 'rgba(0,0,0,0.5)';
-      ctx.fillRect(px, py + TILE * 3 + 2, TILE * 3, 5);
+      ctx.fillRect(px, py + TILE * 3 + 2, TILE * 3, 6);
       ctx.fillStyle = '#60c040';
-      ctx.fillRect(px, py + TILE * 3 + 2, Math.round(TILE * 3 * pct), 5);
+      ctx.fillRect(px, py + TILE * 3 + 2, Math.round(TILE * 3 * pct), 6);
       ctx.fillStyle = '#fff';
-      ctx.font = '7px Georgia';
-      ctx.fillText('Treinando...', px + TILE * 1.5, py + TILE * 3 + 11);
+      ctx.font = '8px Georgia';
+      ctx.fillText('Treinando...', px + TILE * 1.5, py + TILE * 3 + 13);
     }
   }
 }
 
+// ── Villagers ────────────────────────────────────────────────────────────────
 function renderVillagers(snapshot, camTX, camTY) {
   const { ctx } = G;
   for (const v of snapshot.villagers) {
+    const isOwn = v.ownerId === G.playerId;
+    // Enemy villagers only visible in current vision; own units always visible
+    if (!isOwn && !isTileVisible(v.position.x, v.position.y)) continue;
     if (!isInView(v.position.x, v.position.y, camTX, camTY)) continue;
+
     const cx = v.position.x * TILE + TILE / 2;
     const cy = v.position.y * TILE + TILE / 2;
     const isSelected = G.selectedIds.has(v.id);
-    const playerIdx = snapshot.players.findIndex(p => p.id === v.ownerId);
-    const fillColor = COLORS.villager[playerIdx] ?? '#888';
-    const isMe = v.ownerId === G.playerId;
+    const playerIdx  = snapshot.players.findIndex(p => p.id === v.ownerId);
 
     // Movement path line
     if (isSelected && v.state === 'moving' && v.moveTarget) {
       const tx = v.moveTarget.x * TILE + TILE / 2;
       const ty = v.moveTarget.y * TILE + TILE / 2;
       ctx.strokeStyle = COLORS.moveTarget;
-      ctx.lineWidth = 1.5;
-      ctx.setLineDash([3, 3]);
+      ctx.lineWidth = 2;
+      ctx.setLineDash([4, 4]);
       ctx.beginPath();
       ctx.moveTo(cx, cy);
       ctx.lineTo(tx, ty);
       ctx.stroke();
       ctx.setLineDash([]);
-      // Target marker
+      // Destination marker
       ctx.strokeStyle = COLORS.selected;
-      ctx.lineWidth = 1;
+      ctx.lineWidth = 1.5;
       ctx.beginPath();
-      ctx.arc(tx, ty, 4, 0, Math.PI * 2);
+      ctx.arc(tx, ty, 5, 0, Math.PI * 2);
       ctx.stroke();
     }
 
@@ -465,7 +489,7 @@ function renderVillagers(snapshot, camTX, camTY) {
         const ty = node.position.y * TILE + TILE / 2;
         ctx.strokeStyle = COLORS.gatherTarget;
         ctx.lineWidth = 1.5;
-        ctx.setLineDash([2, 4]);
+        ctx.setLineDash([2, 5]);
         ctx.beginPath();
         ctx.moveTo(cx, cy);
         ctx.lineTo(tx, ty);
@@ -477,129 +501,218 @@ function renderVillagers(snapshot, camTX, camTY) {
     // Selection ring
     if (isSelected) {
       ctx.strokeStyle = COLORS.selected;
-      ctx.lineWidth = 2;
+      ctx.lineWidth = 2.5;
       ctx.beginPath();
-      ctx.arc(cx, cy, 9, 0, Math.PI * 2);
+      ctx.arc(cx, cy + 2, TILE / 2 - 1, 0, Math.PI * 2);
       ctx.stroke();
     }
 
     // Shadow
-    ctx.fillStyle = 'rgba(0,0,0,0.25)';
+    ctx.fillStyle = 'rgba(0,0,0,0.2)';
     ctx.beginPath();
-    ctx.ellipse(cx + 1, cy + 7, 5, 2.5, 0, 0, Math.PI * 2);
+    ctx.ellipse(cx + 1, cy + TILE / 2 - 3, 6, 3, 0, 0, Math.PI * 2);
     ctx.fill();
 
-    // Body (tunic)
-    ctx.fillStyle = fillColor;
-    ctx.beginPath();
-    ctx.arc(cx, cy + 1, 6, 0, Math.PI * 2);
-    ctx.fill();
+    // Sprite or fallback shape
+    const sprite = spriteForVillager(v);
+    if (sprite && sprite.complete && sprite.naturalWidth > 0) {
+      // Draw sprite centered on tile
+      const size = TILE - 2;
+      ctx.drawImage(sprite, cx - size / 2, cy - size / 2 - 2, size, size);
 
-    // Head
-    ctx.fillStyle = '#d4a070';
-    ctx.beginPath();
-    ctx.arc(cx, cy - 5, 4, 0, Math.PI * 2);
-    ctx.fill();
-
-    // Helmet (own player = red, other = blue tint)
-    ctx.fillStyle = isMe ? '#c03030' : '#204080';
-    ctx.fillRect(cx - 3, cy - 9, 6, 3);
-
-    // State indicator dot
-    if (v.state === 'gathering') {
-      ctx.fillStyle = '#60d040';
+      // Player color tag (small colored square under feet)
+      ctx.fillStyle = COLORS.villager[playerIdx] ?? '#888';
+      ctx.fillRect(cx - 4, cy + TILE / 2 - 6, 8, 3);
+    } else {
+      // Fallback: draw programmatic villager
+      ctx.fillStyle = COLORS.villager[playerIdx] ?? '#888';
       ctx.beginPath();
-      ctx.arc(cx + 7, cy - 7, 2.5, 0, Math.PI * 2);
+      ctx.arc(cx, cy + 1, 7, 0, Math.PI * 2);
       ctx.fill();
-    } else if (v.state === 'moving') {
-      ctx.fillStyle = '#d0d040';
+      ctx.fillStyle = '#d4a070';
       ctx.beginPath();
-      ctx.arc(cx + 7, cy - 7, 2.5, 0, Math.PI * 2);
+      ctx.arc(cx, cy - 5, 5, 0, Math.PI * 2);
       ctx.fill();
+    }
+
+    // State indicator dot (own units only)
+    if (isOwn) {
+      const dotColor = v.state === 'gathering' ? '#60d040' : v.state === 'moving' ? '#d0d040' : null;
+      if (dotColor) {
+        ctx.fillStyle = dotColor;
+        ctx.beginPath();
+        ctx.arc(cx + TILE / 2 - 4, cy - TILE / 2 + 4, 3, 0, Math.PI * 2);
+        ctx.fill();
+      }
     }
   }
 }
 
-// ─── Input ────────────────────────────────────────────────────────────────────
-function setupInput() {
-  const canvas = G.canvas;
+// ── Fog of War overlay ───────────────────────────────────────────────────────
+function renderFog(camTX, camTY) {
+  const { ctx } = G;
+  const vx = visibleTilesX() + 1;
+  const vy = visibleTilesY() + 1;
 
-  canvas.addEventListener('click', (e) => {
-    const { tx, ty } = pixelToTile(e);
-    const villager = villagerAtTile(tx, ty);
-    if (villager && villager.ownerId === G.playerId) {
-      if (!e.shiftKey) G.selectedIds.clear();
-      G.selectedIds.add(villager.id);
-    } else {
-      G.selectedIds.clear();
-    }
-    updatePanel();
-  });
+  for (let dy = 0; dy < vy; dy++) {
+    const ty = camTY + dy;
+    if (ty < 0 || ty >= mapHeight()) continue;
+    for (let dx = 0; dx < vx; dx++) {
+      const tx = camTX + dx;
+      if (tx < 0 || tx >= mapWidth()) continue;
 
-  canvas.addEventListener('contextmenu', (e) => {
-    e.preventDefault();
-    if (G.selectedIds.size === 0) return;
-    const { tx, ty } = pixelToTile(e);
+      const px = tx * TILE;
+      const py = ty * TILE;
 
-    // Check if clicked on a resource node
-    const node = resourceAtTile(tx, ty);
-    if (node) {
-      for (const vid of G.selectedIds) {
-        send({ type: 'gather_resource', villagerId: vid, nodeId: node.id });
-      }
-    } else {
-      // Move command
-      for (const vid of G.selectedIds) {
-        send({ type: 'move_villager', villagerId: vid, destination: { x: tx, y: ty } });
+      if (isTileVisible(tx, ty)) {
+        // Fully visible — no overlay
+      } else if (isTileRevealed(tx, ty)) {
+        // Explored shroud — dark overlay
+        ctx.fillStyle = COLORS.fogShroud;
+        ctx.fillRect(px, py, TILE, TILE);
+      } else {
+        // Completely unexplored — solid black
+        ctx.fillStyle = COLORS.fogUnexplored;
+        ctx.fillRect(px, py, TILE, TILE);
       }
     }
-  });
+  }
+}
 
-  document.addEventListener('keydown', (e) => {
-    G.keysHeld[e.key] = true;
-    // Prevent WASD from scrolling page
-    if (['w','a','s','d','ArrowUp','ArrowDown','ArrowLeft','ArrowRight'].includes(e.key)) {
-      e.preventDefault();
-    }
-  });
+// ─── Resource node drawing ────────────────────────────────────────────────────
+function drawGoldMine(ctx, cx, cy) {
+  ctx.fillStyle = '#b8900a';
+  ctx.fillRect(cx - 7, cy - 7, 13, 13);
+  ctx.fillStyle = '#e8c040';
+  ctx.fillRect(cx - 5, cy - 5, 9, 9);
+  ctx.fillStyle = '#ffd060';
+  ctx.fillRect(cx - 2, cy - 7, 4, 5);
+  ctx.fillRect(cx + 3, cy + 1, 4, 5);
+  ctx.fillRect(cx - 7, cy + 1, 4, 5);
+  ctx.fillStyle = 'rgba(255,255,200,0.6)';
+  ctx.fillRect(cx - 3, cy - 6, 2, 2);
+}
 
-  document.addEventListener('keyup', (e) => {
-    delete G.keysHeld[e.key];
-  });
+function drawStoneQuarry(ctx, cx, cy) {
+  ctx.fillStyle = '#6a6a6a';
+  ctx.beginPath(); ctx.arc(cx, cy + 2, 7, 0, Math.PI * 2); ctx.fill();
+  ctx.fillStyle = '#8a8a8a';
+  ctx.beginPath(); ctx.arc(cx - 4, cy - 2, 6, 0, Math.PI * 2); ctx.fill();
+  ctx.fillStyle = '#aaaaaa';
+  ctx.beginPath(); ctx.arc(cx + 4, cy - 3, 5, 0, Math.PI * 2); ctx.fill();
+  ctx.strokeStyle = '#444'; ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.moveTo(cx - 1, cy - 6); ctx.lineTo(cx + 2, cy + 2); ctx.stroke();
+}
 
-  document.getElementById('btn-train').addEventListener('click', () => {
-    send({ type: 'train_villager' });
-  });
+function drawTree(ctx, cx, cy) {
+  ctx.fillStyle = '#5a3a10';
+  ctx.fillRect(cx - 3, cy + 4, 5, 8);
+  ctx.fillStyle = '#1a5a1a';
+  ctx.beginPath(); ctx.moveTo(cx, cy - 12); ctx.lineTo(cx + 9, cy + 4); ctx.lineTo(cx - 9, cy + 4); ctx.closePath(); ctx.fill();
+  ctx.fillStyle = '#2a7a2a';
+  ctx.beginPath(); ctx.moveTo(cx, cy - 8); ctx.lineTo(cx + 7, cy + 2); ctx.lineTo(cx - 7, cy + 2); ctx.closePath(); ctx.fill();
+  ctx.fillStyle = 'rgba(100,200,80,0.25)';
+  ctx.beginPath(); ctx.arc(cx - 2, cy - 5, 4, 0, Math.PI * 2); ctx.fill();
+}
+
+function drawDeer(ctx, cx, cy) {
+  ctx.fillStyle = '#a06030';
+  ctx.beginPath(); ctx.ellipse(cx, cy + 3, 7, 5, 0, 0, Math.PI * 2); ctx.fill();
+  ctx.fillStyle = '#b07040';
+  ctx.fillRect(cx + 3, cy - 2, 3, 7);
+  ctx.beginPath(); ctx.arc(cx + 5, cy - 4, 4, 0, Math.PI * 2); ctx.fill();
+  ctx.strokeStyle = '#804020'; ctx.lineWidth = 1.5;
+  ctx.beginPath(); ctx.moveTo(cx + 6, cy - 6); ctx.lineTo(cx + 3, cy - 11); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(cx + 6, cy - 6); ctx.lineTo(cx + 9, cy - 10); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(cx + 4, cy - 9); ctx.lineTo(cx + 6, cy - 11); ctx.stroke();
+  ctx.fillStyle = '#804020';
+  for (const [bx, by] of [[-4,7],[-1,7],[2,7],[5,7]]) {
+    ctx.fillRect(cx + bx, cy + by, 2, 5);
+  }
+}
+
+function drawBerryBush(ctx, cx, cy) {
+  ctx.fillStyle = '#2a5a1a';
+  ctx.beginPath(); ctx.arc(cx, cy, 8, 0, Math.PI * 2); ctx.fill();
+  ctx.fillStyle = '#3a6a28';
+  ctx.beginPath(); ctx.arc(cx - 4, cy - 2, 6, 0, Math.PI * 2); ctx.fill();
+  ctx.beginPath(); ctx.arc(cx + 4, cy - 3, 5, 0, Math.PI * 2); ctx.fill();
+  for (const [bx, by] of [[-4,1],[0,-2],[3,0],[1,4],[-3,4],[-1,-5],[4,-1]]) {
+    ctx.fillStyle = '#c03070';
+    ctx.beginPath(); ctx.arc(cx + bx, cy + by, 2.5, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = '#e04090';
+    ctx.beginPath(); ctx.arc(cx + bx - 0.5, cy + by - 0.5, 1, 0, Math.PI * 2); ctx.fill();
+  }
+}
+
+// ─── Utility ──────────────────────────────────────────────────────────────────
+function isInView(tx, ty, camTX, camTY) {
+  return tx >= camTX - 1
+    && tx <= camTX + visibleTilesX() + 1
+    && ty >= camTY - 1
+    && ty <= camTY + visibleTilesY() + 1;
 }
 
 function pixelToTile(e) {
   const rect = G.canvas.getBoundingClientRect();
   const px = e.clientX - rect.left;
   const py = e.clientY - rect.top;
-  const tx = Math.floor(px / TILE + G.camX);
-  const ty = Math.floor(py / TILE + G.camY);
-  return { tx, ty };
+  return {
+    tx: Math.floor(px / TILE + G.camX),
+    ty: Math.floor(py / TILE + G.camY),
+  };
 }
 
 function villagerAtTile(tx, ty) {
-  if (!G.snapshot) return null;
-  return G.snapshot.villagers.find(
-    v => v.position.x === tx && v.position.y === ty
+  return G.snapshot?.villagers.find(v =>
+    v.position.x === tx && v.position.y === ty && v.ownerId === G.playerId
   ) ?? null;
 }
 
 function resourceAtTile(tx, ty) {
-  if (!G.snapshot) return null;
-  return G.snapshot.resourceNodes.find(
-    n => n.position.x === tx && n.position.y === ty
+  return G.snapshot?.resourceNodes.find(n =>
+    n.position.x === tx && n.position.y === ty
   ) ?? null;
 }
 
-function isInView(tx, ty, camTX, camTY) {
-  return tx >= camTX - 2
-    && tx <= camTX + visibleTilesX() + 2
-    && ty >= camTY - 2
-    && ty <= camTY + visibleTilesY() + 2;
+// ─── Input ────────────────────────────────────────────────────────────────────
+function setupInput() {
+  G.canvas.addEventListener('click', (e) => {
+    const { tx, ty } = pixelToTile(e);
+    const v = villagerAtTile(tx, ty);
+    if (v) {
+      if (!e.shiftKey) G.selectedIds.clear();
+      G.selectedIds.add(v.id);
+    } else {
+      G.selectedIds.clear();
+    }
+    updatePanel();
+  });
+
+  G.canvas.addEventListener('contextmenu', (e) => {
+    e.preventDefault();
+    if (G.selectedIds.size === 0) return;
+    const { tx, ty } = pixelToTile(e);
+    const node = resourceAtTile(tx, ty);
+    if (node) {
+      for (const vid of G.selectedIds) send({ type: 'gather_resource', villagerId: vid, nodeId: node.id });
+    } else {
+      for (const vid of G.selectedIds) send({ type: 'move_villager', villagerId: vid, destination: { x: tx, y: ty } });
+    }
+  });
+
+  document.addEventListener('keydown', (e) => {
+    G.keysHeld[e.key] = true;
+    if (['w','a','s','d','ArrowUp','ArrowDown','ArrowLeft','ArrowRight'].includes(e.key)) {
+      e.preventDefault();
+    }
+  });
+
+  document.addEventListener('keyup', (e) => { delete G.keysHeld[e.key]; });
+
+  document.getElementById('btn-train').addEventListener('click', () => {
+    send({ type: 'train_villager' });
+  });
 }
 
 // ─── HUD & Panel ──────────────────────────────────────────────────────────────
@@ -612,16 +725,15 @@ function updateHUD() {
   document.getElementById('res-stone').textContent = me.resources.stone;
   document.getElementById('res-food').textContent  = me.resources.food;
 
-  const food = me.resources.food;
-  document.getElementById('btn-train').disabled = food < 50;
-
-  // Train status
+  const canAfford = me.resources.food >= 50;
   const myTc = G.snapshot.townCenters.find(tc => tc.ownerId === G.playerId);
+  const training = myTc?.isTraining ?? false;
+  document.getElementById('btn-train').disabled = !canAfford || training;
+
   const trainEl = document.getElementById('train-status');
-  if (myTc?.isTraining) {
+  if (training && myTc) {
     const secs = Math.ceil(myTc.trainTicksRemaining * 0.25);
     trainEl.textContent = `⏳ Treinando... ${secs}s`;
-    document.getElementById('btn-train').disabled = true;
   } else {
     trainEl.textContent = '';
   }
@@ -634,7 +746,6 @@ function updatePanel() {
     return;
   }
   if (!G.snapshot) return;
-
   const lines = [];
   for (const vid of G.selectedIds) {
     const v = G.snapshot.villagers.find(x => x.id === vid);
@@ -642,15 +753,24 @@ function updatePanel() {
     const stateLabel = { idle: 'Ocioso', moving: 'Movendo', gathering: 'Coletando' };
     lines.push(`Aldeão [${v.position.x}, ${v.position.y}]\nEstado: ${stateLabel[v.state] ?? v.state}`);
   }
-  el.textContent = lines.join('\n\n');
+  el.textContent = lines.join('\n\n') || 'Aldeão não encontrado.';
 }
 
 // ─── UI helpers ───────────────────────────────────────────────────────────────
 function hideLobby() {
   document.getElementById('lobby').style.display = 'none';
+
   // Set initial camera to player's base
-  if (G.myPlayerIndex === 0) { G.camX = 0; G.camY = 0; }
-  else { G.camX = Math.max(0, MAP_SIZE - visibleTilesX()); G.camY = Math.max(0, MAP_SIZE - visibleTilesY()); }
+  const mw = mapWidth();
+  const mh = mapHeight();
+  if (G.myPlayerIndex <= 0) {
+    G.camX = 0;
+    G.camY = 0;
+  } else {
+    G.camX = Math.max(0, mw - visibleTilesX() - 2);
+    G.camY = Math.max(0, mh - visibleTilesY() - 2);
+  }
+
   if (!G.animFrameId) gameLoop();
 }
 
@@ -670,13 +790,178 @@ function setHudStatus(msg) {
   document.getElementById('hud-status').textContent = msg;
 }
 
+// ─── Minimap ──────────────────────────────────────────────────────────────────
+
+/** Build the static tile layer (called once when mapTiles arrive). */
+function buildMinimapBase() {
+  const mw = mapWidth();
+  const mh = mapHeight();
+  const mc = document.createElement('canvas');
+  mc.width  = mw;
+  mc.height = mh;
+  const mctx = mc.getContext('2d');
+
+  for (let ty = 0; ty < mh; ty++) {
+    for (let tx = 0; tx < mw; tx++) {
+      const tile = G.mapTiles[ty]?.[tx] ?? 'grass';
+      mctx.fillStyle =
+        tile === 'water' ? '#1e3a5f' :
+        tile === 'dirt'  ? '#7a5c3a' : '#3d6b41';
+      mctx.fillRect(tx, ty, 1, 1);
+    }
+  }
+  G.minimapCanvas = mc;
+}
+
+/** Rebuild the fog overlay image (called when fog changes). */
+function buildMinimapFog() {
+  const mw = mapWidth();
+  const mh = mapHeight();
+  const mc = document.createElement('canvas');
+  mc.width  = mw;
+  mc.height = mh;
+  const mctx = mc.getContext('2d');
+  const imgData = mctx.createImageData(mw, mh);
+  const d = imgData.data;
+
+  for (let ty = 0; ty < mh; ty++) {
+    for (let tx = 0; tx < mw; tx++) {
+      const i = (ty * mw + tx) * 4;
+      if (isTileVisible(tx, ty)) {
+        d[i+3] = 0;           // fully transparent — visible
+      } else if (isTileRevealed(tx, ty)) {
+        d[i+3] = 140;         // dark shroud
+      } else {
+        d[i+3] = 255;         // solid black — unexplored
+      }
+    }
+  }
+  mctx.putImageData(imgData, 0, 0);
+  G.minimapFogCanvas = mc;
+}
+
+/** Render the minimap onto the dedicated #minimap-canvas element. */
+function renderMinimap() {
+  const mc  = G.minimapEl;
+  const mctx = G.minimapCtx;
+  if (!mc || !mctx || !G.minimapCanvas) return;
+
+  const mw = mapWidth();
+  const mh = mapHeight();
+  const W  = mc.width;
+  const H  = mc.height;
+  const scaleX = W / mw;
+  const scaleY = H / mh;
+
+  // 1. Static tile layer
+  mctx.drawImage(G.minimapCanvas, 0, 0, W, H);
+
+  // 2. Resource nodes (dots — last-known-state)
+  if (G.snapshot) {
+    for (const node of G.snapshot.resourceNodes) {
+      if (!isTileRevealed(node.position.x, node.position.y)) continue;
+      mctx.fillStyle = COLORS.resources[node.type] ?? '#fff';
+      mctx.fillRect(
+        node.position.x * scaleX,
+        node.position.y * scaleY,
+        Math.max(2, scaleX * 1.5),
+        Math.max(2, scaleY * 1.5),
+      );
+    }
+  }
+
+  // 3. Town Centers
+  if (G.snapshot) {
+    for (const tc of G.snapshot.townCenters) {
+      if (!isTileRevealed(tc.anchorPosition.x + 1, tc.anchorPosition.y + 1)) continue;
+      const pidx = G.snapshot.players.findIndex(p => p.id === tc.ownerId);
+      mctx.fillStyle = COLORS.tc[pidx] ?? '#888';
+      mctx.fillRect(
+        tc.anchorPosition.x * scaleX,
+        tc.anchorPosition.y * scaleY,
+        3 * scaleX,
+        3 * scaleY,
+      );
+    }
+  }
+
+  // 4. Villagers
+  if (G.snapshot) {
+    for (const v of G.snapshot.villagers) {
+      const isOwn = v.ownerId === G.playerId;
+      if (!isOwn && !isTileVisible(v.position.x, v.position.y)) continue;
+      const pidx = G.snapshot.players.findIndex(p => p.id === v.ownerId);
+      mctx.fillStyle = COLORS.villager[pidx] ?? '#fff';
+      const dotSize = Math.max(3, scaleX * 2);
+      mctx.fillRect(
+        v.position.x * scaleX - dotSize / 2,
+        v.position.y * scaleY - dotSize / 2,
+        dotSize, dotSize,
+      );
+    }
+  }
+
+  // 5. Fog of war overlay
+  if (G.minimapFogCanvas) {
+    mctx.drawImage(G.minimapFogCanvas, 0, 0, W, H);
+  }
+
+  // 6. Camera viewport rectangle
+  const camW = visibleTilesX() * scaleX;
+  const camH = visibleTilesY() * scaleY;
+  const camPx = G.camX * scaleX;
+  const camPy = G.camY * scaleY;
+
+  mctx.strokeStyle = 'rgba(255,255,255,0.9)';
+  mctx.lineWidth = 1.5;
+  mctx.strokeRect(camPx, camPy, camW, camH);
+
+  // Semi-transparent interior tint for visibility
+  mctx.fillStyle = 'rgba(255,255,255,0.08)';
+  mctx.fillRect(camPx, camPy, camW, camH);
+}
+
+/** Move camera so that the minimap click point is the center of the viewport. */
+function moveCameraToMinimapPoint(clientX, clientY) {
+  const rect = G.minimapEl.getBoundingClientRect();
+  const relX = (clientX - rect.left)  / rect.width;
+  const relY = (clientY - rect.top)   / rect.height;
+  const mw = mapWidth();
+  const mh = mapHeight();
+  const targetTileX = relX * mw;
+  const targetTileY = relY * mh;
+  const maxCamX = Math.max(0, mw - visibleTilesX());
+  const maxCamY = Math.max(0, mh - visibleTilesY());
+  G.camX = Math.max(0, Math.min(maxCamX, targetTileX - visibleTilesX() / 2));
+  G.camY = Math.max(0, Math.min(maxCamY, targetTileY - visibleTilesY() / 2));
+}
+
+function setupMinimapInput() {
+  const mc = G.minimapEl;
+
+  mc.addEventListener('mousedown', (e) => {
+    G.isDraggingMinimap = true;
+    moveCameraToMinimapPoint(e.clientX, e.clientY);
+  });
+
+  mc.addEventListener('mousemove', (e) => {
+    if (G.isDraggingMinimap) moveCameraToMinimapPoint(e.clientX, e.clientY);
+  });
+
+  window.addEventListener('mouseup', () => { G.isDraggingMinimap = false; });
+
+  mc.addEventListener('contextmenu', (e) => e.preventDefault());
+}
+
 // ─── Bootstrap ────────────────────────────────────────────────────────────────
 (function init() {
   G.canvas  = document.getElementById('canvas');
   G.wrapper = document.getElementById('canvas-wrapper');
   G.ctx     = G.canvas.getContext('2d');
 
-  // Resize canvas to fill wrapper
+  G.minimapEl  = document.getElementById('minimap-canvas');
+  G.minimapCtx = G.minimapEl.getContext('2d');
+
   function resizeCanvas() {
     G.canvas.width  = G.wrapper.clientWidth;
     G.canvas.height = G.wrapper.clientHeight;
@@ -684,7 +969,9 @@ function setHudStatus(msg) {
   resizeCanvas();
   window.addEventListener('resize', resizeCanvas);
 
+  loadSprites();
   setupInput();
+  setupMinimapInput();
 
   document.getElementById('join-btn').addEventListener('click', () => {
     const name = document.getElementById('name-input').value.trim() || 'Guerreiro';

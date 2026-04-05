@@ -26,7 +26,7 @@ const SPAWN_CONFIGS = [
     villagerOffsets: [{ dx: 5, dy: 0 }, { dx: 5, dy: 1 }, { dx: 5, dy: 2 }],
   },
   {
-    tcAnchorX: 33, tcAnchorY: 33,
+    tcAnchorX: 93, tcAnchorY: 93,
     villagerOffsets: [{ dx: -2, dy: 0 }, { dx: -2, dy: 1 }, { dx: -2, dy: 2 }],
   },
 ];

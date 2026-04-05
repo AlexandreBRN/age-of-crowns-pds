@@ -9,14 +9,14 @@ export interface GeneratedMap {
 }
 
 // Clear zones near spawn corners (no resources placed here)
-const CLEAR_RADIUS = 8;
+const CLEAR_RADIUS = 12;
 const CORNER_SPAWNS = [
-  { x: 3, y: 3 },  // Player 1 base area
-  { x: 36, y: 36 }, // Player 2 base area
+  { x: 4, y: 4 },   // Player 1 base area
+  { x: 94, y: 94 }, // Player 2 base area
 ];
 
 export class MapGeneratorService {
-  static generate(width = 40, height = 40): GeneratedMap {
+  static generate(width = 100, height = 100): GeneratedMap {
     const tiles = this.buildTileGrid(width, height);
     const resourceNodes = this.placeResourceNodes(tiles, width, height);
     return { tiles, resourceNodes };
@@ -38,8 +38,8 @@ export class MapGeneratorService {
       tiles.push(row);
     }
 
-    // Add dirt patches (8-10 clusters)
-    const patchCount = 9;
+    // Add dirt patches (scale with map size)
+    const patchCount = Math.floor(width * height / 200);
     for (let i = 0; i < patchCount; i++) {
       const startX = 3 + Math.floor(Math.random() * (width - 6));
       const startY = 3 + Math.floor(Math.random() * (height - 6));
@@ -100,11 +100,13 @@ export class MapGeneratorService {
       }
     };
 
-    place('gold', 6);
-    place('stone', 5);
-    place('wood', 10);
-    place('food_deer', 5);
-    place('food_berry', 6);
+    // Scale resource count with map size
+    const scale = Math.round((width * height) / (40 * 40));
+    place('gold',       Math.round(6  * scale));
+    place('stone',      Math.round(5  * scale));
+    place('wood',       Math.round(10 * scale));
+    place('food_deer',  Math.round(5  * scale));
+    place('food_berry', Math.round(6  * scale));
 
     return nodes;
   }
