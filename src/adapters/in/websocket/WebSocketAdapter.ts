@@ -4,6 +4,7 @@ import { ILeaveSessionUseCase } from '../../../core/application/ports/in/ILeaveS
 import { IMoveVillagerUseCase } from '../../../core/application/ports/in/IMoveVillagerUseCase';
 import { IGatherResourceUseCase } from '../../../core/application/ports/in/IGatherResourceUseCase';
 import { ITrainVillagerUseCase } from '../../../core/application/ports/in/ITrainVillagerUseCase';
+import { IPlaceBuildingUseCase } from '../../../core/application/ports/in/IPlaceBuildingUseCase';
 import { ISessionRepository } from '../../../core/application/ports/out/ISessionRepository';
 import { GameLoopService } from '../../../core/application/services/GameLoopService';
 import { ClientRegistry, WebSocketEventPublisher } from '../../out/messaging/WebSocketEventPublisher';
@@ -15,6 +16,7 @@ export class WebSocketAdapter {
     private readonly moveVillagerUseCase: IMoveVillagerUseCase,
     private readonly gatherResourceUseCase: IGatherResourceUseCase,
     private readonly trainVillagerUseCase: ITrainVillagerUseCase,
+    private readonly placeBuildingUseCase: IPlaceBuildingUseCase,
     private readonly sessionRepository: ISessionRepository,
     private readonly clientRegistry: ClientRegistry,
     private readonly publisher: WebSocketEventPublisher,
@@ -79,6 +81,15 @@ export class WebSocketAdapter {
 
       case 'train_villager':
         this.trainVillagerUseCase.execute({ playerId: currentPlayerId });
+        break;
+
+      case 'place_building':
+        this.placeBuildingUseCase.execute({
+          playerId: currentPlayerId,
+          buildingType: message.buildingType as any,
+          x: Number(message.x),
+          y: Number(message.y),
+        });
         break;
 
       default:

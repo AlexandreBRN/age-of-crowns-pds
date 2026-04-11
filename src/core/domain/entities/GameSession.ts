@@ -2,6 +2,7 @@ import { v4 as uuidv4 } from 'uuid';
 import { Villager } from './Villager';
 import { TownCenter } from './TownCenter';
 import { ResourceNode, RESOURCE_YIELD } from './ResourceNode';
+import { PlayerBuilding, PlayerBuildingType, BUILDING_CONFIGS } from './PlayerBuilding';
 import { VillagerId } from '../value-objects/VillagerId';
 import { Resources } from '../value-objects/Resources';
 import { TileType, TILE_WALKABLE } from '../value-objects/TileType';
@@ -32,6 +33,7 @@ const SPAWN_CONFIGS = [
 ];
 
 const GATHER_INTERVAL_TICKS = 4;
+const BUILDING_GEN_INTERVAL_TICKS = 8;  // 2 seconds
 const VILLAGER_TRAIN_COST = { food: 50 };
 
 export class GameSession {
@@ -39,6 +41,7 @@ export class GameSession {
   private readonly _villagers: Map<string, Villager> = new Map();
   private readonly _townCenters: Map<string, TownCenter> = new Map();
   private readonly _resourceNodes: Map<string, ResourceNode> = new Map();
+  private readonly _playerBuildings: Map<string, PlayerBuilding> = new Map();
   private _tick = 0;
 
   constructor(
@@ -66,6 +69,7 @@ export class GameSession {
   get villagers(): Villager[] { return Array.from(this._villagers.values()); }
   get townCenters(): TownCenter[] { return Array.from(this._townCenters.values()); }
   get resourceNodes(): ResourceNode[] { return Array.from(this._resourceNodes.values()); }
+  get playerBuildings(): PlayerBuilding[] { return Array.from(this._playerBuildings.values()); }
 
   addPlayer(playerId: string, playerName: string): void {
     if (this._players.size >= 2) throw new Error('Sessão cheia');
@@ -108,6 +112,7 @@ export class GameSession {
     const villager = this._villagers.get(villagerId);
     if (!villager) throw new Error('Aldeão não encontrado');
     if (!this._isTileWalkable(destX, destY)) throw new Error('Destino inválido');
+    if (this._isTileOccupiedByBuilding(destX, destY)) throw new Error('Tile ocupado por construção');
     villager.commandMove(destX, destY);
   }
 
@@ -134,6 +139,39 @@ export class GameSession {
     });
   }
 
+  placeBuilding(playerId: string, type: PlayerBuildingType, x: number, y: number): void {
+    const player = this._players.get(playerId);
+    if (!player) throw new Error('Jogador não encontrado');
+
+    const config = BUILDING_CONFIGS[type];
+    if (!config) throw new Error('Tipo de construção inválido');
+
+    if (!player.resources.canAfford(config.cost)) {
+      throw new Error(`Recursos insuficientes para construir ${config.label}`);
+    }
+
+    // Validate all tiles in the footprint
+    for (let dy = 0; dy < config.height; dy++) {
+      for (let dx = 0; dx < config.width; dx++) {
+        const tx = x + dx;
+        const ty = y + dy;
+        if (!this._isTileWalkable(tx, ty)) {
+          throw new Error('Não é possível construir neste terreno');
+        }
+        if (this._isTileOccupiedByBuilding(tx, ty)) {
+          throw new Error('Tile já ocupado por outra construção');
+        }
+      }
+    }
+
+    const building = new PlayerBuilding(uuidv4(), playerId, type, x, y);
+    this._playerBuildings.set(building.id, building);
+    this._players.set(playerId, {
+      ...player,
+      resources: player.resources.subtract(config.cost),
+    });
+  }
+
   advanceTick(): void {
     this._tick++;
 
@@ -144,7 +182,7 @@ export class GameSession {
       }
     }
 
-    // Gathering (every N ticks)
+    // Resource gathering by villagers
     if (this._tick % GATHER_INTERVAL_TICKS === 0) {
       for (const villager of this._villagers.values()) {
         if (villager.state !== 'gathering' || !villager.gatherTargetId) continue;
@@ -159,6 +197,21 @@ export class GameSession {
           this._players.set(villager.ownerId, {
             ...player,
             resources: player.resources.add({ [node.resourceKind]: harvested }),
+          });
+        }
+      }
+    }
+
+    // Resource generation from buildings
+    if (this._tick % BUILDING_GEN_INTERVAL_TICKS === 0) {
+      for (const building of this._playerBuildings.values()) {
+        const gen = building.config.generates;
+        if (!gen) continue;
+        const player = this._players.get(building.ownerId);
+        if (player) {
+          this._players.set(building.ownerId, {
+            ...player,
+            resources: player.resources.add(gen),
           });
         }
       }
@@ -188,6 +241,7 @@ export class GameSession {
       resourceNodes: Array.from(this._resourceNodes.values())
         .filter(n => !n.isDepleted)
         .map(n => n.toJSON()),
+      playerBuildings: Array.from(this._playerBuildings.values()).map(b => b.toJSON()),
     };
   }
 
@@ -197,6 +251,21 @@ export class GameSession {
     const tile = row[x];
     if (!tile) return false;
     return TILE_WALKABLE[tile];
+  }
+
+  private _isTileOccupiedByBuilding(x: number, y: number): boolean {
+    for (const b of this._playerBuildings.values()) {
+      for (const t of b.occupiedTiles) {
+        if (t.x === x && t.y === y) return true;
+      }
+    }
+    // Also check town center tiles
+    for (const tc of this._townCenters.values()) {
+      for (const t of tc.occupiedTiles) {
+        if (t.x === x && t.y === y) return true;
+      }
+    }
+    return false;
   }
 
   private _getTownCenterOf(playerId: string): TownCenter {

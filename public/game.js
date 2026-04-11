@@ -1,8 +1,19 @@
 // ─── Constants ────────────────────────────────────────────────────────────────
 const TILE = 32;  // pixels per tile
 
-const VISION_VILLAGER   = 5;   // tiles
-const VISION_TOWN_CENTER = 9;  // tiles
+const VISION_VILLAGER    = 5;   // tiles
+const VISION_TOWN_CENTER = 9;   // tiles
+const VISION_WATCHTOWER  = 8;   // tiles
+
+// Client-side building definitions (mirrors server BUILDING_CONFIGS)
+const BUILDING_DEFS = {
+  wall:         { label:'Muro',           width:1, height:1, cost:{stone:2},           color:'#8a7060' },
+  watchtower:   { label:'Torre de Vigia', width:1, height:1, cost:{stone:20,wood:10},   color:'#b09070' },
+  lumber_camp:  { label:'Serraria',       width:2, height:2, cost:{wood:30,stone:5},    color:'#5a7030' },
+  gold_mine:    { label:'Mina de Ouro',   width:2, height:2, cost:{stone:40,wood:20},   color:'#c09020' },
+  farm:         { label:'Fazenda',        width:2, height:2, cost:{wood:25},            color:'#88a030' },
+  stone_quarry: { label:'Pedreira',       width:2, height:2, cost:{wood:30,stone:10},   color:'#808080' },
+};
 
 const COLORS = {
   tiles: {
@@ -68,6 +79,10 @@ const G = {
 
   sprites: {},           // loaded Image objects
   spritesReady: false,
+
+  // Building placement
+  placingBuildingType: null,  // string key from BUILDING_DEFS, or null
+  ghostTile: null,            // { tx, ty } — current cursor tile
 };
 
 // ─── Sprite loading ───────────────────────────────────────────────────────────
@@ -205,6 +220,12 @@ function updateFogOfWar() {
     addVisionCircle(newVisible, v.position.x, v.position.y, VISION_VILLAGER, mw, mh);
   }
 
+  // Watchtowers
+  for (const b of G.snapshot.playerBuildings ?? []) {
+    if (b.ownerId !== G.playerId || b.type !== 'watchtower') continue;
+    addVisionCircle(newVisible, b.x, b.y, VISION_WATCHTOWER, mw, mh);
+  }
+
   G.visibleTiles = newVisible;
 
   // Accumulate into revealed
@@ -279,10 +300,12 @@ function render() {
   if (snapshot) {
     renderResourceNodes(snapshot, camTX, camTY);
     renderTownCenters(snapshot, camTX, camTY);
+    renderPlayerBuildings(snapshot, camTX, camTY);
     renderVillagers(snapshot, camTX, camTY);
   }
 
   renderFog(camTX, camTY);
+  renderBuildingGhost();
 
   ctx.restore();
 
@@ -548,6 +571,218 @@ function renderVillagers(snapshot, camTX, camTY) {
   }
 }
 
+// ── Player Buildings ─────────────────────────────────────────────────────────
+function renderPlayerBuildings(snapshot, camTX, camTY) {
+  const { ctx } = G;
+  for (const b of snapshot.playerBuildings ?? []) {
+    const isOwn = b.ownerId === G.playerId;
+    // Show enemy buildings only if tile was revealed
+    if (!isOwn && !isTileRevealed(b.x, b.y)) continue;
+    // Show own buildings always once placed (buildings persist in fog)
+    if (!isInView(b.x, b.y, camTX, camTY)) continue;
+
+    const px = b.x * TILE;
+    const py = b.y * TILE;
+    const def = BUILDING_DEFS[b.type] ?? { color:'#666', width:1, height:1 };
+    const pw = (b.width ?? def.width) * TILE;
+    const ph = (b.height ?? def.height) * TILE;
+    const pidx = snapshot.players.findIndex(p => p.id === b.ownerId);
+    const playerColor = COLORS.tc[pidx] ?? '#888';
+
+    // Shadow
+    ctx.fillStyle = 'rgba(0,0,0,0.3)';
+    ctx.fillRect(px + 4, py + 4, pw, ph);
+
+    switch (b.type) {
+      case 'wall':
+        ctx.fillStyle = '#9a8878';
+        ctx.fillRect(px, py, pw, ph);
+        ctx.fillStyle = '#baa898';
+        ctx.fillRect(px + 2, py + 2, pw - 4, 4);
+        ctx.fillStyle = '#7a6858';
+        ctx.fillRect(px + 2, py + ph - 6, pw - 4, 4);
+        ctx.strokeStyle = '#6a5848';
+        ctx.lineWidth = 1;
+        ctx.strokeRect(px, py, pw, ph);
+        // Player color strip
+        ctx.fillStyle = playerColor;
+        ctx.globalAlpha = 0.4;
+        ctx.fillRect(px + pw/2 - 2, py + 2, 4, ph - 4);
+        ctx.globalAlpha = 1;
+        break;
+
+      case 'watchtower':
+        ctx.fillStyle = '#8a7860';
+        ctx.fillRect(px + 2, py + 6, pw - 4, ph - 6);
+        // Tower top
+        ctx.fillStyle = '#a09070';
+        ctx.fillRect(px, py, pw, 8);
+        // Battlements
+        ctx.fillStyle = '#b0a080';
+        ctx.fillRect(px, py - 5, 7, 7);
+        ctx.fillRect(px + pw - 7, py - 5, 7, 7);
+        // Arrow slit
+        ctx.fillStyle = '#2a1a08';
+        ctx.fillRect(px + pw/2 - 1, py + 8, 2, 8);
+        // Player flag
+        ctx.fillStyle = playerColor;
+        ctx.fillRect(px + pw/2 - 1, py - 10, 1.5, 8);
+        ctx.fillRect(px + pw/2 + 0.5, py - 10, 7, 5);
+        break;
+
+      case 'lumber_camp':
+        ctx.fillStyle = '#5a7030';
+        ctx.fillRect(px, py, pw, ph);
+        ctx.fillStyle = '#7a9048';
+        ctx.fillRect(px + 4, py + 4, pw - 8, ph - 8);
+        // Log piles
+        ctx.fillStyle = '#8a6040';
+        ctx.fillRect(px + 6, py + 6, pw/2 - 4, ph/2 - 4);
+        ctx.fillStyle = '#7a5030';
+        ctx.fillRect(px + 8, py + 8, pw/2 - 8, 5);
+        ctx.fillRect(px + 8, py + 14, pw/2 - 8, 5);
+        ctx.fillStyle = playerColor;
+        ctx.globalAlpha = 0.5;
+        ctx.fillRect(px + pw - 10, py + 4, 6, 6);
+        ctx.globalAlpha = 1;
+        break;
+
+      case 'gold_mine':
+        ctx.fillStyle = '#7a6840';
+        ctx.fillRect(px, py, pw, ph);
+        ctx.fillStyle = '#c09020';
+        ctx.fillRect(px + 4, py + 4, pw - 8, ph - 8);
+        // Gold vein
+        ctx.fillStyle = '#e8c040';
+        ctx.fillRect(px + 8, py + 8, pw/2 - 4, ph/2 - 4);
+        ctx.fillStyle = '#ffd060';
+        ctx.fillRect(px + 10, py + 10, 6, 6);
+        ctx.fillStyle = playerColor;
+        ctx.globalAlpha = 0.5;
+        ctx.fillRect(px + pw - 10, py + 4, 6, 6);
+        ctx.globalAlpha = 1;
+        break;
+
+      case 'farm':
+        ctx.fillStyle = '#6a8020';
+        ctx.fillRect(px, py, pw, ph);
+        // Crop rows
+        ctx.fillStyle = '#a0c040';
+        for (let row = 0; row < 3; row++) {
+          ctx.fillRect(px + 4, py + 4 + row * (ph / 3.5), pw - 8, (ph / 3.5) - 2);
+        }
+        ctx.fillStyle = '#d0e060';
+        ctx.fillRect(px + 6, py + 6, 6, ph/2 - 4);
+        ctx.fillStyle = playerColor;
+        ctx.globalAlpha = 0.5;
+        ctx.fillRect(px + pw - 10, py + 4, 6, 6);
+        ctx.globalAlpha = 1;
+        break;
+
+      case 'stone_quarry':
+        ctx.fillStyle = '#707070';
+        ctx.fillRect(px, py, pw, ph);
+        ctx.fillStyle = '#909090';
+        ctx.fillRect(px + 4, py + 4, pw - 8, ph - 8);
+        // Stone chunks
+        ctx.fillStyle = '#aaaaaa';
+        ctx.fillRect(px + 6, py + 6, 10, 8);
+        ctx.fillRect(px + 18, py + 10, 8, 6);
+        ctx.fillStyle = '#cccccc';
+        ctx.fillRect(px + 8, py + 8, 5, 4);
+        ctx.fillStyle = playerColor;
+        ctx.globalAlpha = 0.5;
+        ctx.fillRect(px + pw - 10, py + 4, 6, 6);
+        ctx.globalAlpha = 1;
+        break;
+
+      default:
+        ctx.fillStyle = def.color;
+        ctx.fillRect(px, py, pw, ph);
+    }
+
+    // Border
+    ctx.strokeStyle = '#3a2808';
+    ctx.lineWidth = 1;
+    ctx.strokeRect(px, py, pw, ph);
+  }
+}
+
+// ── Building Ghost Preview ───────────────────────────────────────────────────
+function renderBuildingGhost() {
+  if (!G.placingBuildingType || !G.ghostTile) return;
+  const { ctx } = G;
+  const def = BUILDING_DEFS[G.placingBuildingType];
+  if (!def) return;
+
+  const { tx, ty } = G.ghostTile;
+  const canAfford = canAffordBuilding(G.placingBuildingType);
+  const valid = canAfford && isTileRangeWalkable(tx, ty, def.width, def.height);
+
+  ctx.globalAlpha = 0.55;
+  ctx.fillStyle = valid ? '#40c040' : '#c04040';
+  ctx.fillRect(tx * TILE, ty * TILE, def.width * TILE, def.height * TILE);
+  ctx.globalAlpha = 1;
+
+  ctx.strokeStyle = valid ? '#80ff80' : '#ff8080';
+  ctx.lineWidth = 2;
+  ctx.setLineDash([4, 3]);
+  ctx.strokeRect(tx * TILE, ty * TILE, def.width * TILE, def.height * TILE);
+  ctx.setLineDash([]);
+
+  // Label above ghost
+  ctx.fillStyle = '#fff';
+  ctx.font = 'bold 9px Georgia';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'bottom';
+  ctx.fillText(def.label, tx * TILE + def.width * TILE / 2, ty * TILE - 2);
+}
+
+function isTileRangeWalkable(tx, ty, w, h) {
+  if (!G.mapTiles) return false;
+  const mh = G.mapTiles.length;
+  const mw = G.mapTiles[0]?.length ?? 0;
+  for (let dy = 0; dy < h; dy++) {
+    for (let dx = 0; dx < w; dx++) {
+      const x = tx + dx;
+      const y = ty + dy;
+      if (x < 0 || y < 0 || x >= mw || y >= mh) return false;
+      const tile = G.mapTiles[y]?.[x];
+      if (!tile || tile === 'water') return false;
+      // Check occupied by existing buildings / TC
+      if (isTileOccupied(x, y)) return false;
+    }
+  }
+  return true;
+}
+
+function isTileOccupied(tx, ty) {
+  if (!G.snapshot) return false;
+  for (const b of G.snapshot.playerBuildings ?? []) {
+    const def = BUILDING_DEFS[b.type] ?? { width:1, height:1 };
+    const bw = b.width ?? def.width;
+    const bh = b.height ?? def.height;
+    if (tx >= b.x && tx < b.x + bw && ty >= b.y && ty < b.y + bh) return true;
+  }
+  for (const tc of G.snapshot.townCenters ?? []) {
+    const ax = tc.anchorPosition.x;
+    const ay = tc.anchorPosition.y;
+    if (tx >= ax && tx < ax + 3 && ty >= ay && ty < ay + 3) return true;
+  }
+  return false;
+}
+
+function canAffordBuilding(type) {
+  if (!G.snapshot || G.myPlayerIndex < 0) return false;
+  const me = G.snapshot.players[G.myPlayerIndex];
+  if (!me) return false;
+  const cost = BUILDING_DEFS[type]?.cost ?? {};
+  for (const [res, amt] of Object.entries(cost)) {
+    if ((me.resources[res] ?? 0) < amt) return false;
+  }
+  return true;
+}
+
 // ── Fog of War overlay ───────────────────────────────────────────────────────
 function renderFog(camTX, camTY) {
   const { ctx } = G;
@@ -677,8 +912,28 @@ function resourceAtTile(tx, ty) {
 
 // ─── Input ────────────────────────────────────────────────────────────────────
 function setupInput() {
+  // Track cursor tile for ghost preview
+  G.canvas.addEventListener('mousemove', (e) => {
+    G.ghostTile = pixelToTile(e);
+  });
+  G.canvas.addEventListener('mouseleave', () => {
+    G.ghostTile = null;
+  });
+
   G.canvas.addEventListener('click', (e) => {
     const { tx, ty } = pixelToTile(e);
+
+    // Building placement mode
+    if (G.placingBuildingType) {
+      const def = BUILDING_DEFS[G.placingBuildingType];
+      if (def && isTileRangeWalkable(tx, ty, def.width, def.height) && canAffordBuilding(G.placingBuildingType)) {
+        send({ type: 'place_building', buildingType: G.placingBuildingType, x: tx, y: ty });
+        // Keep placement mode active (allows rapid placing) unless shift not held
+        if (!e.shiftKey) cancelPlacingMode();
+      }
+      return;
+    }
+
     const v = villagerAtTile(tx, ty);
     if (v) {
       if (!e.shiftKey) G.selectedIds.clear();
@@ -691,6 +946,13 @@ function setupInput() {
 
   G.canvas.addEventListener('contextmenu', (e) => {
     e.preventDefault();
+
+    // Cancel building placement on right-click
+    if (G.placingBuildingType) {
+      cancelPlacingMode();
+      return;
+    }
+
     if (G.selectedIds.size === 0) return;
     const { tx, ty } = pixelToTile(e);
     const node = resourceAtTile(tx, ty);
@@ -702,6 +964,10 @@ function setupInput() {
   });
 
   document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') {
+      cancelPlacingMode();
+      return;
+    }
     G.keysHeld[e.key] = true;
     if (['w','a','s','d','ArrowUp','ArrowDown','ArrowLeft','ArrowRight'].includes(e.key)) {
       e.preventDefault();
@@ -713,6 +979,12 @@ function setupInput() {
   document.getElementById('btn-train').addEventListener('click', () => {
     send({ type: 'train_villager' });
   });
+}
+
+function cancelPlacingMode() {
+  G.placingBuildingType = null;
+  G.canvas.style.cursor = 'default';
+  document.querySelectorAll('.build-btn').forEach(b => b.classList.remove('selected'));
 }
 
 // ─── HUD & Panel ──────────────────────────────────────────────────────────────
@@ -736,6 +1008,20 @@ function updateHUD() {
     trainEl.textContent = `⏳ Treinando... ${secs}s`;
   } else {
     trainEl.textContent = '';
+  }
+
+  updateBuildBar(me.resources);
+}
+
+function updateBuildBar(resources) {
+  for (const [type, def] of Object.entries(BUILDING_DEFS)) {
+    const btn = document.getElementById(`build-${type}`);
+    if (!btn) continue;
+    let canAfford = true;
+    for (const [res, amt] of Object.entries(def.cost)) {
+      if ((resources[res] ?? 0) < amt) { canAfford = false; break; }
+    }
+    btn.disabled = !canAfford;
   }
 }
 
@@ -885,7 +1171,18 @@ function renderMinimap() {
     }
   }
 
-  // 4. Villagers
+  // 4. Player buildings
+  if (G.snapshot) {
+    for (const b of G.snapshot.playerBuildings ?? []) {
+      if (!isTileRevealed(b.x, b.y)) continue;
+      const def = BUILDING_DEFS[b.type];
+      if (!def) continue;
+      mctx.fillStyle = def.color;
+      mctx.fillRect(b.x * scaleX, b.y * scaleY, def.width * scaleX, def.height * scaleY);
+    }
+  }
+
+  // 5. Villagers
   if (G.snapshot) {
     for (const v of G.snapshot.villagers) {
       const isOwn = v.ownerId === G.playerId;
@@ -980,6 +1277,22 @@ function setupMinimapInput() {
 
   document.getElementById('name-input').addEventListener('keydown', (e) => {
     if (e.key === 'Enter') document.getElementById('join-btn').click();
+  });
+
+  // Building bar buttons
+  document.querySelectorAll('.build-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const type = btn.dataset.type;
+      if (!type || !BUILDING_DEFS[type]) return;
+      if (G.placingBuildingType === type) {
+        cancelPlacingMode();
+        return;
+      }
+      G.placingBuildingType = type;
+      G.canvas.style.cursor = 'crosshair';
+      document.querySelectorAll('.build-btn').forEach(b => b.classList.remove('selected'));
+      btn.classList.add('selected');
+    });
   });
 
   connect();

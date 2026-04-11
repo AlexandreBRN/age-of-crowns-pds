@@ -28,6 +28,16 @@ export interface PlayerSnapshotDTO {
   resources: { gold: number; wood: number; stone: number; food: number };
 }
 
+export interface PlayerBuildingDTO {
+  id: string;
+  ownerId: string;
+  type: string;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
 export interface GameStateSnapshot {
   sessionId: string;
   tick: number;
@@ -35,4 +45,5 @@ export interface GameStateSnapshot {
   villagers: VillagerDTO[];
   townCenters: TownCenterDTO[];
   resourceNodes: ResourceNodeDTO[];
+  playerBuildings: PlayerBuildingDTO[];
 }

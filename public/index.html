@@ -197,6 +197,78 @@
 
     #lobby-status { color: #7a6040; font-size: 0.85rem; }
 
+    /* Building bar */
+    #build-bar {
+      background: linear-gradient(to top, #1a0d04, #2a1a08);
+      border-top: 2px solid #5a3a10;
+      padding: 6px 10px;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      flex-shrink: 0;
+      overflow-x: auto;
+    }
+
+    #build-bar-label {
+      font-size: 10px;
+      color: #7a6040;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      white-space: nowrap;
+      margin-right: 4px;
+    }
+
+    .build-btn {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 2px;
+      padding: 5px 8px;
+      min-width: 72px;
+      background: linear-gradient(to bottom, #3a2408, #221204);
+      border: 1px solid #6a4018;
+      border-radius: 4px;
+      cursor: pointer;
+      color: #e8d5a0;
+      font-family: 'Georgia', serif;
+      font-size: 10px;
+      transition: border-color 0.15s, background 0.15s;
+      white-space: nowrap;
+      flex-shrink: 0;
+    }
+
+    .build-btn:hover:not(:disabled) {
+      background: linear-gradient(to bottom, #5a3a10, #3a2408);
+      border-color: #c8980a;
+    }
+
+    .build-btn.selected {
+      background: linear-gradient(to bottom, #7a5010, #5a3408);
+      border-color: #d4a830;
+      box-shadow: 0 0 6px rgba(212,168,48,0.4);
+    }
+
+    .build-btn:disabled { opacity: 0.3; cursor: not-allowed; }
+
+    .build-btn .build-icon { font-size: 20px; line-height: 1; }
+    .build-btn .build-name { font-size: 10px; color: #d4a830; }
+    .build-btn .build-cost { font-size: 9px; color: #998060; line-height: 1.4; }
+
+    .build-separator {
+      width: 1px;
+      height: 42px;
+      background: #4a2a08;
+      flex-shrink: 0;
+    }
+
+    #build-hint {
+      margin-left: auto;
+      font-size: 10px;
+      color: #5a4020;
+      white-space: nowrap;
+      padding-left: 8px;
+    }
+
     /* Waiting */
     #waiting-overlay {
       position: fixed;
@@ -226,7 +298,8 @@
     <span id="hud-status">–</span>
   </div>
 
-  <!-- Game area -->
+  <!-- Game area + building bar wrapper -->
+  <div style="display:flex;flex-direction:column;flex:1;overflow:hidden;">
   <div id="game-area">
     <div id="canvas-wrapper">
       <canvas id="canvas"></canvas>
@@ -262,6 +335,53 @@
       </div>
     </div>
   </div>
+
+  <!-- Building bar -->
+  <div id="build-bar">
+    <span id="build-bar-label">⚒ Construir</span>
+
+    <button class="build-btn" id="build-wall" data-type="wall">
+      <span class="build-icon">🧱</span>
+      <span class="build-name">Muro</span>
+      <span class="build-cost">🪨 2</span>
+    </button>
+
+    <button class="build-btn" id="build-watchtower" data-type="watchtower">
+      <span class="build-icon">🗼</span>
+      <span class="build-name">Torre de Vigia</span>
+      <span class="build-cost">🪨 20 🪵 10</span>
+    </button>
+
+    <div class="build-separator"></div>
+
+    <button class="build-btn" id="build-lumber_camp" data-type="lumber_camp">
+      <span class="build-icon">🪚</span>
+      <span class="build-name">Serraria</span>
+      <span class="build-cost">🪵 30 🪨 5</span>
+    </button>
+
+    <button class="build-btn" id="build-gold_mine" data-type="gold_mine">
+      <span class="build-icon">⛏</span>
+      <span class="build-name">Mina de Ouro</span>
+      <span class="build-cost">🪨 40 🪵 20</span>
+    </button>
+
+    <button class="build-btn" id="build-farm" data-type="farm">
+      <span class="build-icon">🌾</span>
+      <span class="build-name">Fazenda</span>
+      <span class="build-cost">🪵 25</span>
+    </button>
+
+    <button class="build-btn" id="build-stone_quarry" data-type="stone_quarry">
+      <span class="build-icon">🏗</span>
+      <span class="build-name">Pedreira</span>
+      <span class="build-cost">🪵 30 🪨 10</span>
+    </button>
+
+    <span id="build-hint">Clique para selecionar · Clique dir para cancelar · Esc para sair</span>
+  </div>
+
+  </div> <!-- end game+bar wrapper -->
 
   <!-- Lobby -->
   <div id="lobby">
