@@ -5,6 +5,7 @@ export interface PlaceBuildingCommand {
   buildingType: PlayerBuildingType;
   x: number;
   y: number;
+  villagerId?: string;
 }
 
 export interface IPlaceBuildingUseCase {

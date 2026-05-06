@@ -9,14 +9,14 @@ export interface GeneratedMap {
 }
 
 // Clear zones near spawn corners (no resources placed here)
-const CLEAR_RADIUS = 12;
+const CLEAR_RADIUS = 10;
 const CORNER_SPAWNS = [
-  { x: 4, y: 4 },   // Player 1 base area
-  { x: 94, y: 94 }, // Player 2 base area
+  { x: 4,  y: 4  },  // Player 1 — top-left corner
+  { x: 56, y: 56 },  // Player 2 — bottom-right corner (60×60 map)
 ];
 
 export class MapGeneratorService {
-  static generate(width = 100, height = 100): GeneratedMap {
+  static generate(width = 60, height = 60): GeneratedMap {
     const tiles = this.buildTileGrid(width, height);
     const resourceNodes = this.placeResourceNodes(tiles, width, height);
     return { tiles, resourceNodes };

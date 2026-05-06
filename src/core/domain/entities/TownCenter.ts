@@ -1,7 +1,11 @@
-const TRAIN_COST_TICKS = 20; // 5 seconds at 250ms/tick
+import { UnitType } from './Villager';
+
+const TOWN_CENTER_MAX_HP = 500;
 
 export class TownCenter {
   private _trainTicksRemaining = 0;
+  private _trainingUnitType: UnitType | null = null;
+  private _hp = TOWN_CENTER_MAX_HP;
 
   constructor(
     private readonly _id: string,
@@ -16,8 +20,11 @@ export class TownCenter {
   get anchorY(): number { return this._anchorY; }
   get isTraining(): boolean { return this._trainTicksRemaining > 0; }
   get trainTicksRemaining(): number { return this._trainTicksRemaining; }
+  get trainingUnitType(): UnitType | null { return this._trainingUnitType; }
+  get hp(): number { return this._hp; }
+  get maxHp(): number { return TOWN_CENTER_MAX_HP; }
+  get isDestroyed(): boolean { return this._hp <= 0; }
 
-  /** Returns occupied tile positions (3x3 grid). */
   get occupiedTiles(): { x: number; y: number }[] {
     const tiles: { x: number; y: number }[] = [];
     for (let dy = 0; dy < 3; dy++) {
@@ -28,18 +35,26 @@ export class TownCenter {
     return tiles;
   }
 
-  startTraining(): void {
+  startTraining(unitType: UnitType, ticks: number): void {
     if (this._trainTicksRemaining > 0) {
-      throw new Error('Centro de cidade já está treinando um aldeão');
+      throw new Error('Centro de cidade já está treinando uma unidade');
     }
-    this._trainTicksRemaining = TRAIN_COST_TICKS;
+    this._trainingUnitType = unitType;
+    this._trainTicksRemaining = ticks;
   }
 
   /** Returns true when training completes this tick. */
   tickTraining(): boolean {
     if (this._trainTicksRemaining <= 0) return false;
     this._trainTicksRemaining--;
-    return this._trainTicksRemaining === 0;
+    if (this._trainTicksRemaining === 0) {
+      return true;
+    }
+    return false;
+  }
+
+  takeDamage(amount: number): void {
+    this._hp = Math.max(0, this._hp - amount);
   }
 
   toJSON() {
@@ -49,6 +64,9 @@ export class TownCenter {
       anchorPosition: { x: this._anchorX, y: this._anchorY },
       isTraining: this.isTraining,
       trainTicksRemaining: this._trainTicksRemaining,
+      trainingUnitType: this._trainingUnitType,
+      hp: this._hp,
+      maxHp: TOWN_CENTER_MAX_HP,
     };
   }
 }

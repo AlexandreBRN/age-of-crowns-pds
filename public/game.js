@@ -15,6 +15,13 @@ const BUILDING_DEFS = {
   stone_quarry: { label:'Pedreira',       width:2, height:2, cost:{wood:30,stone:10},   color:'#808080' },
 };
 
+// Unit configs (mirrors server UNIT_CONFIGS)
+const UNIT_DEFS = {
+  villager: { label:'Aldeão',    maxHp:50,  color:null,      trainCost:{food:50},         trainTicks:20 },
+  archer:   { label:'Arqueiro',  maxHp:40,  color:'#40a860', trainCost:{food:50,wood:30}, trainTicks:24 },
+  cavalry:  { label:'Cavaleiro', maxHp:80,  color:'#d08020', trainCost:{food:80,gold:50}, trainTicks:40 },
+};
+
 const COLORS = {
   tiles: {
     grass: ['#3d6b41', '#446f48', '#3a6640', '#4a7550'],
@@ -456,9 +463,21 @@ function renderTownCenters(snapshot, camTX, camTY) {
     ctx.textBaseline = 'middle';
     ctx.fillText(pName.substring(0, 9), px + TILE * 1.5, py + TILE * 1.5);
 
+    // HP bar
+    if (tc.hp < tc.maxHp) {
+      const barW = TILE * 3;
+      const pct  = tc.hp / tc.maxHp;
+      ctx.fillStyle = 'rgba(0,0,0,0.6)';
+      ctx.fillRect(px, py - 7, barW, 5);
+      ctx.fillStyle = pct > 0.5 ? '#50e040' : pct > 0.25 ? '#e0c040' : '#e04040';
+      ctx.fillRect(px, py - 7, Math.round(barW * pct), 5);
+    }
+
     // Training progress
     if (tc.isTraining && isOwn) {
-      const pct = 1 - tc.trainTicksRemaining / 20;
+      const unitTicks = { villager:20, archer:24, cavalry:40 };
+      const totalTicks = unitTicks[tc.trainingUnitType] ?? 20;
+      const pct = 1 - tc.trainTicksRemaining / totalTicks;
       ctx.fillStyle = 'rgba(0,0,0,0.5)';
       ctx.fillRect(px, py + TILE * 3 + 2, TILE * 3, 6);
       ctx.fillStyle = '#60c040';
@@ -536,31 +555,35 @@ function renderVillagers(snapshot, camTX, camTY) {
     ctx.ellipse(cx + 1, cy + TILE / 2 - 3, 6, 3, 0, 0, Math.PI * 2);
     ctx.fill();
 
-    // Sprite or fallback shape
-    const sprite = spriteForVillager(v);
-    if (sprite && sprite.complete && sprite.naturalWidth > 0) {
-      // Draw sprite centered on tile
-      const size = TILE - 2;
-      ctx.drawImage(sprite, cx - size / 2, cy - size / 2 - 2, size, size);
-
-      // Player color tag (small colored square under feet)
-      ctx.fillStyle = COLORS.villager[playerIdx] ?? '#888';
-      ctx.fillRect(cx - 4, cy + TILE / 2 - 6, 8, 3);
+    // Draw unit based on type
+    const pColor = COLORS.villager[playerIdx] ?? '#888';
+    if (v.unitType === 'archer') {
+      drawArcher(ctx, cx, cy, pColor);
+    } else if (v.unitType === 'cavalry') {
+      drawCavalry(ctx, cx, cy, pColor);
     } else {
-      // Fallback: draw programmatic villager
-      ctx.fillStyle = COLORS.villager[playerIdx] ?? '#888';
-      ctx.beginPath();
-      ctx.arc(cx, cy + 1, 7, 0, Math.PI * 2);
-      ctx.fill();
-      ctx.fillStyle = '#d4a070';
-      ctx.beginPath();
-      ctx.arc(cx, cy - 5, 5, 0, Math.PI * 2);
-      ctx.fill();
+      // Villager: sprite or fallback
+      const sprite = spriteForVillager(v);
+      if (sprite && sprite.complete && sprite.naturalWidth > 0) {
+        const size = TILE - 2;
+        ctx.drawImage(sprite, cx - size / 2, cy - size / 2 - 2, size, size);
+        ctx.fillStyle = pColor;
+        ctx.fillRect(cx - 4, cy + TILE / 2 - 6, 8, 3);
+      } else {
+        ctx.fillStyle = pColor;
+        ctx.beginPath(); ctx.arc(cx, cy + 1, 7, 0, Math.PI * 2); ctx.fill();
+        ctx.fillStyle = '#d4a070';
+        ctx.beginPath(); ctx.arc(cx, cy - 5, 5, 0, Math.PI * 2); ctx.fill();
+      }
     }
 
     // State indicator dot (own units only)
     if (isOwn) {
-      const dotColor = v.state === 'gathering' ? '#60d040' : v.state === 'moving' ? '#d0d040' : null;
+      const dotColor = v.state === 'gathering'   ? '#60d040'
+        : v.state === 'moving'      ? '#d0d040'
+        : v.state === 'constructing'? '#f0a020'
+        : v.state === 'attacking'   ? '#ff4040'
+        : null;
       if (dotColor) {
         ctx.fillStyle = dotColor;
         ctx.beginPath();
@@ -568,7 +591,23 @@ function renderVillagers(snapshot, camTX, camTY) {
         ctx.fill();
       }
     }
+
+    // Health bar (always shown for own units, shown for visible enemies)
+    drawUnitHealthBar(ctx, cx, cy, v.hp, v.maxHp);
   }
+}
+
+function drawUnitHealthBar(ctx, cx, cy, hp, maxHp) {
+  if (hp >= maxHp) return; // full health — hide bar
+  const barW = TILE - 4;
+  const barH = 3;
+  const barX = cx - barW / 2;
+  const barY = cy - TILE / 2 - 6;
+  const pct  = hp / maxHp;
+  ctx.fillStyle = 'rgba(0,0,0,0.7)';
+  ctx.fillRect(barX - 1, barY - 1, barW + 2, barH + 2);
+  ctx.fillStyle = pct > 0.5 ? '#50e040' : pct > 0.25 ? '#e0c040' : '#e04040';
+  ctx.fillRect(barX, barY, Math.round(barW * pct), barH);
 }
 
 // ── Player Buildings ─────────────────────────────────────────────────────────
@@ -594,22 +633,41 @@ function renderPlayerBuildings(snapshot, camTX, camTY) {
     ctx.fillRect(px + 4, py + 4, pw, ph);
 
     switch (b.type) {
-      case 'wall':
+      case 'wall': {
+        // Wall extends above tile so adjacent walls look like a connected rampart
+        const wallH = Math.round(TILE * 1.5);
+        const wallY = py - (wallH - ph);  // extends upward
+        // Shadow
+        ctx.fillStyle = 'rgba(0,0,0,0.35)';
+        ctx.fillRect(px + 4, wallY + 4, pw, wallH);
+        // Base stone body
         ctx.fillStyle = '#9a8878';
-        ctx.fillRect(px, py, pw, ph);
-        ctx.fillStyle = '#baa898';
-        ctx.fillRect(px + 2, py + 2, pw - 4, 4);
+        ctx.fillRect(px, wallY, pw, wallH);
+        // Stone texture rows
+        ctx.fillStyle = '#b0a090';
+        ctx.fillRect(px + 2, wallY + 3, pw - 4, 5);
+        ctx.fillRect(px + 2, wallY + 11, pw - 4, 5);
+        ctx.fillRect(px + 2, wallY + 19, pw - 4, 5);
+        // Dark mortar lines
         ctx.fillStyle = '#7a6858';
-        ctx.fillRect(px + 2, py + ph - 6, pw - 4, 4);
-        ctx.strokeStyle = '#6a5848';
-        ctx.lineWidth = 1;
-        ctx.strokeRect(px, py, pw, ph);
-        // Player color strip
+        ctx.fillRect(px, wallY + 8, pw, 2);
+        ctx.fillRect(px, wallY + 16, pw, 2);
+        ctx.fillRect(px, wallY + 24, pw, 2);
+        // Battlements at top
+        ctx.fillStyle = '#aaa090';
+        ctx.fillRect(px,           wallY - 6, 8, 8);
+        ctx.fillRect(px + pw - 8,  wallY - 6, 8, 8);
+        // Player color stripe
         ctx.fillStyle = playerColor;
-        ctx.globalAlpha = 0.4;
-        ctx.fillRect(px + pw/2 - 2, py + 2, 4, ph - 4);
+        ctx.globalAlpha = 0.35;
+        ctx.fillRect(px + 3, wallY + 3, pw - 6, wallH - 6);
         ctx.globalAlpha = 1;
+        // Outline
+        ctx.strokeStyle = '#5a4838';
+        ctx.lineWidth = 1.5;
+        ctx.strokeRect(px, wallY, pw, wallH);
         break;
+      }
 
       case 'watchtower':
         ctx.fillStyle = '#8a7860';
@@ -705,6 +763,40 @@ function renderPlayerBuildings(snapshot, camTX, camTY) {
     ctx.strokeStyle = '#3a2808';
     ctx.lineWidth = 1;
     ctx.strokeRect(px, py, pw, ph);
+
+    // HP bar (complete buildings only)
+    if (b.status === 'complete' && b.hp < b.maxHp) {
+      const barW = pw;
+      const pct  = b.hp / b.maxHp;
+      ctx.fillStyle = 'rgba(0,0,0,0.6)';
+      ctx.fillRect(px, py - 6, barW, 4);
+      ctx.fillStyle = pct > 0.5 ? '#50e040' : pct > 0.25 ? '#e0c040' : '#e04040';
+      ctx.fillRect(px, py - 6, Math.round(barW * pct), 4);
+    }
+
+    // Under-construction overlay: scaffolding + progress bar
+    if (b.status === 'under_construction') {
+      // Semi-transparent dark overlay
+      ctx.fillStyle = 'rgba(0,0,0,0.45)';
+      ctx.fillRect(px, py, pw, ph);
+
+      // Scaffolding cross lines
+      ctx.strokeStyle = '#c8a040';
+      ctx.lineWidth = 1.5;
+      ctx.setLineDash([3, 3]);
+      ctx.beginPath();
+      ctx.moveTo(px, py); ctx.lineTo(px + pw, py + ph);
+      ctx.moveTo(px + pw, py); ctx.lineTo(px, py + ph);
+      ctx.stroke();
+      ctx.setLineDash([]);
+
+      // Progress bar at bottom of footprint
+      const pct = 1 - (b.constructionTicksRemaining / b.constructionTotalTicks);
+      ctx.fillStyle = 'rgba(0,0,0,0.7)';
+      ctx.fillRect(px, py + ph - 5, pw, 5);
+      ctx.fillStyle = pct < 0.5 ? '#d08020' : '#60c040';
+      ctx.fillRect(px, py + ph - 5, Math.round(pw * pct), 5);
+    }
   }
 }
 
@@ -758,10 +850,10 @@ function isTileRangeWalkable(tx, ty, w, h) {
 
 function isTileOccupied(tx, ty) {
   if (!G.snapshot) return false;
+  // All buildings (including under construction) block new placement
   for (const b of G.snapshot.playerBuildings ?? []) {
-    const def = BUILDING_DEFS[b.type] ?? { width:1, height:1 };
-    const bw = b.width ?? def.width;
-    const bh = b.height ?? def.height;
+    const bw = b.width ?? 1;
+    const bh = b.height ?? 1;
     if (tx >= b.x && tx < b.x + bw && ty >= b.y && ty < b.y + bh) return true;
   }
   for (const tc of G.snapshot.townCenters ?? []) {
@@ -880,6 +972,64 @@ function drawBerryBush(ctx, cx, cy) {
   }
 }
 
+function drawArcher(ctx, cx, cy, playerColor) {
+  // Body (green cloak)
+  ctx.fillStyle = playerColor;
+  ctx.beginPath(); ctx.arc(cx, cy + 2, 7, 0, Math.PI * 2); ctx.fill();
+  // Hood/head
+  ctx.fillStyle = '#d4a070';
+  ctx.beginPath(); ctx.arc(cx, cy - 5, 4, 0, Math.PI * 2); ctx.fill();
+  // Bow (arc shape)
+  ctx.strokeStyle = '#8B4513';
+  ctx.lineWidth = 1.5;
+  ctx.beginPath();
+  ctx.arc(cx + 6, cy, 6, -Math.PI * 0.6, Math.PI * 0.6);
+  ctx.stroke();
+  // Bowstring
+  ctx.strokeStyle = '#ddd';
+  ctx.lineWidth = 0.8;
+  ctx.beginPath();
+  ctx.moveTo(cx + 6, cy - 5.5);
+  ctx.lineTo(cx + 4, cy);
+  ctx.lineTo(cx + 6, cy + 5.5);
+  ctx.stroke();
+  // Arrow
+  ctx.strokeStyle = '#8B4513';
+  ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.moveTo(cx + 3, cy); ctx.lineTo(cx + 11, cy); ctx.stroke();
+  ctx.fillStyle = '#c0c0c0';
+  ctx.fillRect(cx + 10, cy - 1, 3, 2);
+}
+
+function drawCavalry(ctx, cx, cy, playerColor) {
+  // Horse body (brown ellipse)
+  ctx.fillStyle = '#8B5E3C';
+  ctx.beginPath(); ctx.ellipse(cx, cy + 5, 10, 6, 0, 0, Math.PI * 2); ctx.fill();
+  // Horse head
+  ctx.fillStyle = '#7a4e30';
+  ctx.beginPath(); ctx.ellipse(cx + 10, cy + 1, 5, 4, -0.3, 0, Math.PI * 2); ctx.fill();
+  // Legs
+  ctx.fillStyle = '#6B4226';
+  for (const lx of [-6, -2, 3, 7]) {
+    ctx.fillRect(cx + lx, cy + 9, 2, 6);
+  }
+  // Rider body
+  ctx.fillStyle = playerColor;
+  ctx.beginPath(); ctx.arc(cx - 1, cy - 3, 6, 0, Math.PI * 2); ctx.fill();
+  // Rider head
+  ctx.fillStyle = '#d4a070';
+  ctx.beginPath(); ctx.arc(cx - 1, cy - 10, 4, 0, Math.PI * 2); ctx.fill();
+  // Helmet
+  ctx.fillStyle = '#888';
+  ctx.beginPath(); ctx.arc(cx - 1, cy - 11, 4, Math.PI, 0); ctx.fill();
+  // Lance
+  ctx.strokeStyle = '#8B4513';
+  ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.moveTo(cx + 4, cy - 8); ctx.lineTo(cx + 16, cy - 2); ctx.stroke();
+  ctx.fillStyle = '#aaa';
+  ctx.beginPath(); ctx.moveTo(cx + 16, cy - 2); ctx.lineTo(cx + 19, cy - 5); ctx.lineTo(cx + 20, cy - 1); ctx.closePath(); ctx.fill();
+}
+
 // ─── Utility ──────────────────────────────────────────────────────────────────
 function isInView(tx, ty, camTX, camTY) {
   return tx >= camTX - 1
@@ -910,6 +1060,29 @@ function resourceAtTile(tx, ty) {
   ) ?? null;
 }
 
+function enemyTargetAt(tx, ty) {
+  if (!G.snapshot) return null;
+  // Enemy unit
+  for (const v of G.snapshot.villagers) {
+    if (v.ownerId === G.playerId) continue;
+    if (v.position.x === tx && v.position.y === ty) return { id: v.id, kind: 'unit' };
+  }
+  // Enemy building
+  for (const b of G.snapshot.playerBuildings ?? []) {
+    if (b.ownerId === G.playerId) continue;
+    if (tx >= b.x && tx < b.x + b.width && ty >= b.y && ty < b.y + b.height) {
+      return { id: b.id, kind: 'building' };
+    }
+  }
+  // Enemy TC
+  for (const tc of G.snapshot.townCenters) {
+    if (tc.ownerId === G.playerId) continue;
+    const ax = tc.anchorPosition.x, ay = tc.anchorPosition.y;
+    if (tx >= ax && tx < ax + 3 && ty >= ay && ty < ay + 3) return { id: tc.id, kind: 'town_center' };
+  }
+  return null;
+}
+
 // ─── Input ────────────────────────────────────────────────────────────────────
 function setupInput() {
   // Track cursor tile for ghost preview
@@ -927,8 +1100,9 @@ function setupInput() {
     if (G.placingBuildingType) {
       const def = BUILDING_DEFS[G.placingBuildingType];
       if (def && isTileRangeWalkable(tx, ty, def.width, def.height) && canAffordBuilding(G.placingBuildingType)) {
-        send({ type: 'place_building', buildingType: G.placingBuildingType, x: tx, y: ty });
-        // Keep placement mode active (allows rapid placing) unless shift not held
+        // Send selected villager so server assigns them to construct
+        const villagerId = G.selectedIds.size === 1 ? [...G.selectedIds][0] : undefined;
+        send({ type: 'place_building', buildingType: G.placingBuildingType, x: tx, y: ty, villagerId });
         if (!e.shiftKey) cancelPlacingMode();
       }
       return;
@@ -947,14 +1121,23 @@ function setupInput() {
   G.canvas.addEventListener('contextmenu', (e) => {
     e.preventDefault();
 
-    // Cancel building placement on right-click
-    if (G.placingBuildingType) {
-      cancelPlacingMode();
+    if (G.placingBuildingType) { cancelPlacingMode(); return; }
+    if (G.selectedIds.size === 0) return;
+
+    const { tx, ty } = pixelToTile(e);
+
+    // Check for attack target (enemy unit / building / TC)
+    const attackTarget = enemyTargetAt(tx, ty);
+    if (attackTarget) {
+      for (const vid of G.selectedIds) {
+        const v = G.snapshot?.villagers.find(x => x.id === vid);
+        if (v && v.unitType !== 'villager') {
+          send({ type: 'attack_target', villagerId: vid, targetId: attackTarget.id, targetKind: attackTarget.kind });
+        }
+      }
       return;
     }
 
-    if (G.selectedIds.size === 0) return;
-    const { tx, ty } = pixelToTile(e);
     const node = resourceAtTile(tx, ty);
     if (node) {
       for (const vid of G.selectedIds) send({ type: 'gather_resource', villagerId: vid, nodeId: node.id });
@@ -976,8 +1159,10 @@ function setupInput() {
 
   document.addEventListener('keyup', (e) => { delete G.keysHeld[e.key]; });
 
-  document.getElementById('btn-train').addEventListener('click', () => {
-    send({ type: 'train_villager' });
+  document.querySelectorAll('[data-unit]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      send({ type: 'train_villager', unitType: btn.dataset.unit });
+    });
   });
 }
 
@@ -997,15 +1182,21 @@ function updateHUD() {
   document.getElementById('res-stone').textContent = me.resources.stone;
   document.getElementById('res-food').textContent  = me.resources.food;
 
-  const canAfford = me.resources.food >= 50;
   const myTc = G.snapshot.townCenters.find(tc => tc.ownerId === G.playerId);
   const training = myTc?.isTraining ?? false;
-  document.getElementById('btn-train').disabled = !canAfford || training;
+  const r = me.resources;
+
+  document.getElementById('btn-train').disabled         = training || r.food < 50;
+  document.getElementById('btn-train-archer').disabled  = training || r.food < 50 || r.wood < 30;
+  document.getElementById('btn-train-cavalry').disabled = training || r.food < 80 || r.gold < 50;
 
   const trainEl = document.getElementById('train-status');
   if (training && myTc) {
+    const unitTicks = { villager:20, archer:24, cavalry:40 };
+    const totalTicks = unitTicks[myTc.trainingUnitType] ?? 20;
     const secs = Math.ceil(myTc.trainTicksRemaining * 0.25);
-    trainEl.textContent = `⏳ Treinando... ${secs}s`;
+    const label = UNIT_DEFS[myTc.trainingUnitType]?.label ?? 'Unidade';
+    trainEl.textContent = `⏳ ${label}... ${secs}s`;
   } else {
     trainEl.textContent = '';
   }
@@ -1036,8 +1227,9 @@ function updatePanel() {
   for (const vid of G.selectedIds) {
     const v = G.snapshot.villagers.find(x => x.id === vid);
     if (!v) continue;
-    const stateLabel = { idle: 'Ocioso', moving: 'Movendo', gathering: 'Coletando' };
-    lines.push(`Aldeão [${v.position.x}, ${v.position.y}]\nEstado: ${stateLabel[v.state] ?? v.state}`);
+    const stateLabel = { idle:'Ocioso', moving:'Movendo', gathering:'Coletando', constructing:'Construindo', attacking:'Atacando' };
+    const unitLabel  = UNIT_DEFS[v.unitType]?.label ?? 'Unidade';
+    lines.push(`${unitLabel} [${v.position.x},${v.position.y}]\n❤ ${v.hp}/${v.maxHp} · ${stateLabel[v.state] ?? v.state}`);
   }
   el.textContent = lines.join('\n\n') || 'Aldeão não encontrado.';
 }

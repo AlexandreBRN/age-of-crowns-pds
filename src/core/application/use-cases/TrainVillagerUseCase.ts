@@ -6,7 +6,7 @@ export class TrainVillagerUseCase implements ITrainVillagerUseCase {
 
   execute(command: TrainVillagerCommand): void {
     const session = this.sessionRepository.findDefault();
-    session.startTrainingVillager(command.playerId);
+    session.startTrainingUnit(command.playerId, command.unitType ?? 'villager');
     this.sessionRepository.save(session);
   }
 }

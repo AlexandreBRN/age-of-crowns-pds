@@ -1,10 +1,16 @@
 export interface VillagerDTO {
   id: string;
   ownerId: string;
+  unitType: 'villager' | 'archer' | 'cavalry';
   position: { x: number; y: number };
-  state: 'idle' | 'moving' | 'gathering';
+  hp: number;
+  maxHp: number;
+  state: 'idle' | 'moving' | 'gathering' | 'constructing' | 'attacking';
   moveTarget: { x: number; y: number } | null;
   gatherTarget: string | null;
+  constructTarget: string | null;
+  attackTargetId: string | null;
+  attackTargetKind: 'unit' | 'building' | 'town_center' | null;
 }
 
 export interface TownCenterDTO {
@@ -13,6 +19,9 @@ export interface TownCenterDTO {
   anchorPosition: { x: number; y: number };
   isTraining: boolean;
   trainTicksRemaining: number;
+  trainingUnitType: 'villager' | 'archer' | 'cavalry' | null;
+  hp: number;
+  maxHp: number;
 }
 
 export interface ResourceNodeDTO {
@@ -36,6 +45,11 @@ export interface PlayerBuildingDTO {
   y: number;
   width: number;
   height: number;
+  status: 'under_construction' | 'complete';
+  constructionTicksRemaining: number;
+  constructionTotalTicks: number;
+  hp: number;
+  maxHp: number;
 }
 
 export interface GameStateSnapshot {

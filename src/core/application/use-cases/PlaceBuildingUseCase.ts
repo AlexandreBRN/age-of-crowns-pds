@@ -6,7 +6,7 @@ export class PlaceBuildingUseCase implements IPlaceBuildingUseCase {
 
   execute(command: PlaceBuildingCommand): void {
     const session = this.sessionRepository.findDefault();
-    session.placeBuilding(command.playerId, command.buildingType, command.x, command.y);
+    session.placeBuilding(command.playerId, command.buildingType, command.x, command.y, command.villagerId);
     this.sessionRepository.save(session);
   }
 }

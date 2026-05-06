@@ -80,7 +80,18 @@ export class WebSocketAdapter {
         break;
 
       case 'train_villager':
-        this.trainVillagerUseCase.execute({ playerId: currentPlayerId });
+        this.trainVillagerUseCase.execute({
+          playerId: currentPlayerId,
+          unitType: (message.unitType as any) ?? 'villager',
+        });
+        break;
+
+      case 'attack_target':
+        this.sessionRepository.findDefault().commandVillagerAttack(
+          String(message.villagerId),
+          String(message.targetId),
+          message.targetKind as any,
+        );
         break;
 
       case 'place_building':
@@ -89,6 +100,7 @@ export class WebSocketAdapter {
           buildingType: message.buildingType as any,
           x: Number(message.x),
           y: Number(message.y),
+          villagerId: message.villagerId ? String(message.villagerId) : undefined,
         });
         break;
 
