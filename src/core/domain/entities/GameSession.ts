@@ -233,11 +233,17 @@ export class GameSession {
           attacker.resetAttackCounter();
         }
       } else {
-        // Out of range: move toward target (cavalry takes 2 steps)
+        // Out of range: move toward target with greedy 8-directional step.
         for (let step = 0; step < cfg.moveSpeedTiles; step++) {
           const dx = Math.sign(targetPos.x - attacker.x);
           const dy = Math.sign(targetPos.y - attacker.y);
-          if (dx !== 0 && !isTileBlocked(attacker.x + dx, attacker.y)) {
+          const diagOk = dx !== 0 && dy !== 0
+            && !isTileBlocked(attacker.x + dx, attacker.y + dy)
+            && !isTileBlocked(attacker.x + dx, attacker.y)
+            && !isTileBlocked(attacker.x, attacker.y + dy);
+          if (diagOk) {
+            attacker.nudge(dx, dy);
+          } else if (dx !== 0 && !isTileBlocked(attacker.x + dx, attacker.y)) {
             attacker.nudge(dx, 0);
           } else if (dy !== 0 && !isTileBlocked(attacker.x, attacker.y + dy)) {
             attacker.nudge(0, dy);

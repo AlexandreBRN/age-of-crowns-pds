@@ -11,7 +11,7 @@ import { TrainVillagerUseCase } from './core/application/use-cases/TrainVillager
 import { PlaceBuildingUseCase } from './core/application/use-cases/PlaceBuildingUseCase';
 import { GameLoopService } from './core/application/services/GameLoopService';
 
-const PORT = Number(process.env.PORT ?? 3000);
+const PORT = Number(process.env.PORT ?? 4000);
 
 // --- Shared state ---
 const clientRegistry: ClientRegistry = new Map();

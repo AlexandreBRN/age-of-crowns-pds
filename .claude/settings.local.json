@@ -3,7 +3,41 @@
     "allow": [
       "Bash(npm install:*)",
       "Bash(npx tsc:*)",
-      "Bash(npm run:*)"
+      "Bash(npm run:*)",
+      "Bash(curl -sI http://localhost:3000/)",
+      "Bash(curl -sI http://localhost:4000/)",
+      "Bash(file *.png)",
+      "Bash(curl -sI http://localhost:4000/sprites/externalWalls/wood-wall.png)",
+      "Bash(curl -sI http://localhost:4000/sprites/constructions/woodWall_N.png)",
+      "Bash(curl -s http://localhost:4000/)",
+      "Bash(pkill -f \"ts-node.*main\")",
+      "Bash(cat)",
+      "Bash(python3 /tmp/render_roof.py)",
+      "Bash(pip3 install *)",
+      "Bash(python3 -c \"from PIL import Image; print\\('ok'\\)\")",
+      "Bash(python3 /tmp/render_roof.py && ls -la /tmp/roof_render.png)",
+      "Read(//tmp/**)",
+      "Bash(python3 /tmp/render_variants.py)",
+      "Bash(python3 /tmp/render_right.py)",
+      "Bash(python3 /tmp/render_current.py)",
+      "Bash(python3 /tmp/render_apex.py)",
+      "Bash(python3 -c \"from PIL import Image; im = Image.open\\('/Users/lucassaraivacardoso/age-of-crowns-pds/public/sprites/constructions/roofPeak.png'\\); print\\(im.size, im.mode\\); print\\('corner pixel:', im.getpixel\\(\\(0,0\\)\\)\\)\")",
+      "Bash(python3)",
+      "Bash(python3 /tmp/render_with_peak.py)",
+      "Bash(python3 /tmp/render_test.py)",
+      "Bash(python3 /tmp/render_lift.py)",
+      "Bash(python3 /tmp/render_now.py)",
+      "Bash(python3 /tmp/render_remove.py)",
+      "Bash(python3 /tmp/render_both.py)",
+      "Bash(python3 /tmp/render_labeled2.py)",
+      "Bash(cp /tmp/labeled2.png /Users/lucassaraivacardoso/age-of-crowns-pds/telhado-numerado.png && ls -la /Users/lucassaraivacardoso/age-of-crowns-pds/telhado-numerado.png)",
+      "Bash(python3 /tmp/render_skip24.py)",
+      "Bash(python3 /tmp/render_45.py)",
+      "Bash(python3 /tmp/render_60.py)",
+      "Bash(python3 /tmp/render_52.py)"
+    ],
+    "additionalDirectories": [
+      "/private/tmp"
     ]
   }
 }

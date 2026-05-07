@@ -1,4 +1,5 @@
 import { VillagerId } from '../value-objects/VillagerId';
+import { findPath, PathTile } from '../services/Pathfinder';
 
 export type UnitType = 'villager' | 'archer' | 'cavalry';
 export type AttackTargetKind = 'unit' | 'building' | 'town_center';
@@ -56,6 +57,7 @@ export class Villager {
   private _state: VillagerState = 'idle';
   private _moveTargetX: number | null = null;
   private _moveTargetY: number | null = null;
+  private _path: PathTile[] = [];
   private _gatherTargetId: string | null = null;
   private _gatherTargetX: number | null = null;
   private _gatherTargetY: number | null = null;
@@ -99,6 +101,7 @@ export class Villager {
   commandMove(destX: number, destY: number): void {
     this._moveTargetX = destX;
     this._moveTargetY = destY;
+    this._path = [];
     this._gatherTargetId = null;
     this._gatherTargetX = null;
     this._gatherTargetY = null;
@@ -115,6 +118,7 @@ export class Villager {
     this._gatherTargetY = nodeY;
     this._moveTargetX = nodeX;
     this._moveTargetY = nodeY;
+    this._path = [];
     this._constructTargetId = null;
     this._attackTargetId = null;
     this._attackTargetKind = null;
@@ -126,6 +130,7 @@ export class Villager {
     this._constructTargetId = buildingId;
     this._moveTargetX = destX;
     this._moveTargetY = destY;
+    this._path = [];
     this._gatherTargetId = null;
     this._gatherTargetX = null;
     this._gatherTargetY = null;
@@ -143,6 +148,7 @@ export class Villager {
     this._constructTargetId = null;
     this._moveTargetX = null;
     this._moveTargetY = null;
+    this._path = [];
     this._attackTickCounter = 0;
     this._state = 'attacking';
   }
@@ -151,6 +157,7 @@ export class Villager {
     this._state = 'idle';
     this._moveTargetX = null;
     this._moveTargetY = null;
+    this._path = [];
     this._gatherTargetId = null;
     this._gatherTargetX = null;
     this._gatherTargetY = null;
@@ -177,13 +184,15 @@ export class Villager {
   }
 
   /**
-   * Moves one tile toward current move target, respecting blocked tiles.
+   * Moves one tile toward current move target along an A*-computed path.
+   * Supports 8-directional movement with corner-cutting prevention.
    * Returns true if position changed.
    */
   stepTowardTarget(isBlocked?: (x: number, y: number) => boolean): boolean {
     if (this._moveTargetX === null || this._moveTargetY === null) return false;
 
     if (this._x === this._moveTargetX && this._y === this._moveTargetY) {
+      this._path = [];
       if (this._constructTargetId !== null) {
         this._state = 'constructing';
         this._moveTargetX = null;
@@ -200,19 +209,29 @@ export class Villager {
       return false;
     }
 
-    const dx = Math.sign(this._moveTargetX - this._x);
-    const dy = Math.sign(this._moveTargetY - this._y);
     const blocked = isBlocked ?? (() => false);
 
-    if (dx !== 0 && !blocked(this._x + dx, this._y)) {
-      this._x += dx;
-      return true;
+    if (this._path.length === 0) {
+      this._path = findPath(this._x, this._y, this._moveTargetX, this._moveTargetY, blocked);
+      if (this._path.length === 0) return false;
     }
-    if (dy !== 0 && !blocked(this._x, this._y + dy)) {
-      this._y += dy;
-      return true;
+
+    const next = this._path[0];
+    const sdx = next.x - this._x;
+    const sdy = next.y - this._y;
+    if (Math.abs(sdx) > 1 || Math.abs(sdy) > 1 || blocked(next.x, next.y)) {
+      this._path = [];
+      return false;
     }
-    return false;
+    if (sdx !== 0 && sdy !== 0 && (blocked(this._x + sdx, this._y) || blocked(this._x, this._y + sdy))) {
+      this._path = [];
+      return false;
+    }
+
+    this._x = next.x;
+    this._y = next.y;
+    this._path.shift();
+    return true;
   }
 
   setIdle(): void {
@@ -222,6 +241,7 @@ export class Villager {
     this._gatherTargetY = null;
     this._moveTargetX = null;
     this._moveTargetY = null;
+    this._path = [];
     this._constructTargetId = null;
     this._attackTargetId = null;
     this._attackTargetKind = null;

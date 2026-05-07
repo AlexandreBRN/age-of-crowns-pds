@@ -1,5 +1,29 @@
 // ─── Constants ────────────────────────────────────────────────────────────────
-const TILE = 32;  // pixels per tile
+// Isometric 2:1 projection (classic AoE-style)
+const TILE_W = 80;            // diamond width  (px)
+const TILE_H = 40;            // diamond height (px)
+const TILE   = TILE_W;        // legacy alias used to size upright sprites
+const SPRITE_SCALE = TILE / 32;  // shape-drawing functions were authored for 32px tiles
+
+// Iso projection helpers — world tile (tx, ty) ↔ screen pixel (sx, sy)
+// World origin offset by `mh * TILE_W / 2` so the entire map fits in positive screen coords.
+function worldToScreen(tx, ty) {
+  const originX = mapHeight() * TILE_W / 2;
+  return {
+    sx: (tx - ty) * TILE_W / 2 + originX,
+    sy: (tx + ty) * TILE_H / 2,
+  };
+}
+function screenToWorld(sx, sy) {
+  const originX = mapHeight() * TILE_W / 2;
+  const a = (sx - originX) * 2 / TILE_W;  // tx - ty
+  const b = sy * 2 / TILE_H;              // tx + ty
+  return { tx: (a + b) / 2, ty: (b - a) / 2 };
+}
+function worldExtent() {
+  const total = mapWidth() + mapHeight();
+  return { w: total * TILE_W / 2, h: total * TILE_H / 2 };
+}
 
 const VISION_VILLAGER    = 5;   // tiles
 const VISION_TOWN_CENTER = 9;   // tiles
@@ -74,9 +98,9 @@ const G = {
   minimapCtx: null,
   isDraggingMinimap: false,
 
-  // Camera in tile coordinates (float)
-  camX: 0,
-  camY: 0,
+  // Camera in screen pixels (top-left of viewport in iso world space)
+  camSX: 0,
+  camSY: 0,
   keysHeld: {},
 
   canvas: null,
@@ -87,10 +111,230 @@ const G = {
   sprites: {},           // loaded Image objects
   spritesReady: false,
 
+  // Pre-rendered terrain sprite variants (built once at startup)
+  terrainSprites: { grass: [], dirt: [] },
+
+  // Building sprite assets (canvas elements after color-key + load)
+  buildingSprites: {},
+
   // Building placement
   placingBuildingType: null,  // string key from BUILDING_DEFS, or null
   ghostTile: null,            // { tx, ty } — current cursor tile
 };
+
+// Apply a near-white color key to a loaded image and return an offscreen canvas
+// with the white background replaced by transparency. Used for sprites that
+// were exported as RGB (no alpha channel).
+function colorKeyWhite(img, threshold = 240) {
+  const c = document.createElement('canvas');
+  c.width = img.naturalWidth || img.width;
+  c.height = img.naturalHeight || img.height;
+  const cx = c.getContext('2d');
+  cx.drawImage(img, 0, 0);
+  try {
+    const data = cx.getImageData(0, 0, c.width, c.height);
+    const d = data.data;
+    for (let i = 0; i < d.length; i += 4) {
+      if (d[i] >= threshold && d[i+1] >= threshold && d[i+2] >= threshold) {
+        d[i+3] = 0;
+      }
+    }
+    cx.putImageData(data, 0, 0);
+  } catch (e) {
+    // CORS-tainted canvas — fall back to the raw image
+    console.warn('color-key skipped:', e?.message);
+  }
+  return c;
+}
+
+// Load building sprite PNGs into G.buildingSprites. Each entry is the canvas
+// produced by colorKeyWhite (so any opaque-white background becomes transparent).
+function loadBuildingSprites() {
+  const paths = {
+    wall_wood:  '/sprites/externalWalls/wood-wall.png',
+    wall_stone: '/sprites/externalWalls/stone-wall.png',
+    gate_wood:  '/sprites/externalWalls/wood-gate.png',
+    gate_stone: '/sprites/externalWalls/stone-gate.png',
+
+    // Kenney iso building pieces — 256×512 each, tile diamond centered at (128, 320)
+    woodWall_N:  '/sprites/constructions/woodWall_N.png',
+    woodWall_S:  '/sprites/constructions/woodWall_S.png',
+    woodWall_E:  '/sprites/constructions/woodWall_E.png',
+    woodWall_W:  '/sprites/constructions/woodWall_W.png',
+    woodWallDoor_S: '/sprites/constructions/woodWallDoorClosed_S.png',
+    woodWallWindow_S: '/sprites/constructions/woodWallWindow_S.png',
+    woodWallWindow_E: '/sprites/constructions/woodWallWindow_E.png',
+    woodWallCorner_N: '/sprites/constructions/woodWallCorner_N.png',
+    roof_N: '/sprites/constructions/roof_N.png',
+    roof_S: '/sprites/constructions/roof_S.png',
+    roof_E: '/sprites/constructions/roof_E.png',
+    roof_W: '/sprites/constructions/roof_W.png',
+    roofCorner_N: '/sprites/constructions/roofCorner_N.png',
+    roofCorner_S: '/sprites/constructions/roofCorner_S.png',
+    roofCorner_E: '/sprites/constructions/roofCorner_E.png',
+    roofCorner_W: '/sprites/constructions/roofCorner_W.png',
+    roofPeak: '/sprites/constructions/roofPeak.png',
+    chimneyBase_N: '/sprites/constructions/chimneyBase_N.png',
+    chimneyTop_N:  '/sprites/constructions/chimneyTop_N.png',
+  };
+  for (const [name, path] of Object.entries(paths)) {
+    const img = new Image();
+    img.onload = () => { G.buildingSprites[name] = colorKeyWhite(img); };
+    img.onerror = () => { console.warn('Failed to load sprite:', path); };
+    img.src = path;
+  }
+}
+
+// Kenney iso pieces are 256×512 with rendering at 30°-45°-0° iso angle.
+// The tile diamond occupies the BOTTOM 256×128 of the image (image y∈[384,512]);
+// the 384 px above is headroom for tall objects (walls, towers, etc.).
+// Anchor: image bottom-center maps to the world tile's bottom corner (south point).
+function drawIsoPiece(spriteName, tx, ty, yOffset = 0) {
+  const sprite = G.buildingSprites?.[spriteName];
+  if (!sprite) return false;
+  const { sx, sy } = worldToScreen(tx, ty);
+  const scale = TILE_W / 256;
+  const drawW = 256 * scale;                          // = TILE_W
+  const drawH = 512 * scale;                          // = 2 * TILE_W
+  const drawX = sx - drawW / 2;
+  // Image bottom (y=512) → world tile bottom corner (sy + TILE_H)
+  // → drawY = sy + TILE_H - drawH
+  const drawY = sy + TILE_H - drawH + yOffset;
+  G.ctx.drawImage(sprite, drawX, drawY, drawW, drawH);
+  return true;
+}
+
+// ─── Terrain sprite generation ────────────────────────────────────────────────
+// Pre-render N variants per terrain type to offscreen canvases. Each tile then
+// hash-picks a variant by (tx, ty) — stable across frames, varied across the map.
+function makeSeededRand(seed) {
+  let s = (seed | 0) || 1;
+  return () => {
+    s = (s * 1664525 + 1013904223) | 0;
+    return ((s >>> 0) % 100000) / 100000;
+  };
+}
+
+function clipDiamond(cx) {
+  cx.beginPath();
+  cx.moveTo(TILE_W / 2, 0);
+  cx.lineTo(TILE_W,     TILE_H / 2);
+  cx.lineTo(TILE_W / 2, TILE_H);
+  cx.lineTo(0,          TILE_H / 2);
+  cx.closePath();
+  cx.clip();
+}
+
+function makeGrassSprite(seed) {
+  const c = document.createElement('canvas');
+  c.width = TILE_W;
+  c.height = TILE_H;
+  const cx = c.getContext('2d');
+  const rand = makeSeededRand(seed * 7919 + 13);
+
+  clipDiamond(cx);
+
+  // Base color from palette
+  cx.fillStyle = COLORS.tiles.grass[seed % COLORS.tiles.grass.length];
+  cx.fillRect(0, 0, TILE_W, TILE_H);
+
+  // Lighter highlight blobs
+  const highlights = 4 + Math.floor(rand() * 4);
+  for (let i = 0; i < highlights; i++) {
+    cx.fillStyle = `rgba(150, 200, 110, ${0.10 + rand() * 0.15})`;
+    cx.beginPath();
+    cx.arc(rand() * TILE_W, rand() * TILE_H, 2 + rand() * 5, 0, Math.PI * 2);
+    cx.fill();
+  }
+
+  // Shadow blobs
+  const shadows = 4 + Math.floor(rand() * 4);
+  for (let i = 0; i < shadows; i++) {
+    cx.fillStyle = `rgba(20, 50, 25, ${0.08 + rand() * 0.14})`;
+    cx.beginPath();
+    cx.arc(rand() * TILE_W, rand() * TILE_H, 1.5 + rand() * 4, 0, Math.PI * 2);
+    cx.fill();
+  }
+
+  // Grass blade strokes (short to fit a flatter tile)
+  const blades = 10 + Math.floor(rand() * 8);
+  for (let i = 0; i < blades; i++) {
+    const bx = rand() * TILE_W;
+    const by = 2 + rand() * (TILE_H - 4);
+    const h  = 1 + rand() * 3;
+    cx.fillStyle = rand() > 0.55
+      ? `rgba(180, 220, 130, ${0.4 + rand() * 0.3})`
+      : `rgba(35, 70, 30, ${0.35 + rand() * 0.25})`;
+    cx.fillRect(bx, by, 1, h);
+  }
+
+  // Occasional flower
+  if (rand() > 0.75) {
+    const fx = 4 + rand() * (TILE_W - 8);
+    const fy = 4 + rand() * (TILE_H - 8);
+    const palette = ['#ffe060', '#ff7090', '#fffadc', '#c060e0'];
+    cx.fillStyle = palette[Math.floor(rand() * palette.length)];
+    cx.fillRect(fx, fy, 2, 2);
+    cx.fillStyle = 'rgba(255,255,255,0.5)';
+    cx.fillRect(fx, fy, 1, 1);
+  }
+
+  return c;
+}
+
+function makeDirtSprite(seed) {
+  const c = document.createElement('canvas');
+  c.width = TILE_W;
+  c.height = TILE_H;
+  const cx = c.getContext('2d');
+  const rand = makeSeededRand(seed * 6151 + 91);
+
+  clipDiamond(cx);
+
+  cx.fillStyle = COLORS.tiles.dirt[seed % COLORS.tiles.dirt.length];
+  cx.fillRect(0, 0, TILE_W, TILE_H);
+
+  const sandy = 5 + Math.floor(rand() * 4);
+  for (let i = 0; i < sandy; i++) {
+    cx.fillStyle = `rgba(190, 150, 95, ${0.10 + rand() * 0.15})`;
+    cx.beginPath();
+    cx.arc(rand() * TILE_W, rand() * TILE_H, 3 + rand() * 7, 0, Math.PI * 2);
+    cx.fill();
+  }
+
+  const dark = 4 + Math.floor(rand() * 3);
+  for (let i = 0; i < dark; i++) {
+    cx.fillStyle = `rgba(45, 25, 12, ${0.18 + rand() * 0.18})`;
+    cx.beginPath();
+    cx.arc(rand() * TILE_W, rand() * TILE_H, 2 + rand() * 5, 0, Math.PI * 2);
+    cx.fill();
+  }
+
+  const pebbles = 6 + Math.floor(rand() * 6);
+  for (let i = 0; i < pebbles; i++) {
+    const px = rand() * (TILE_W - 2);
+    const py = rand() * (TILE_H - 2);
+    const sz = 1 + rand() * 1.5;
+    cx.fillStyle = rand() > 0.5 ? '#b8a080' : '#3a2810';
+    cx.fillRect(px, py, sz, sz);
+  }
+
+  return c;
+}
+
+function buildTerrainSprites() {
+  G.terrainSprites.grass = [];
+  G.terrainSprites.dirt  = [];
+  for (let i = 0; i < 12; i++) G.terrainSprites.grass.push(makeGrassSprite(i));
+  for (let i = 0; i < 10; i++) G.terrainSprites.dirt.push(makeDirtSprite(i));
+}
+
+// Stable pseudo-hash for (tx, ty) → variant index
+function tileHash(tx, ty) {
+  let h = (tx | 0) * 73856093 ^ (ty | 0) * 19349663;
+  h = (h ^ (h >>> 13)) * 1274126177;
+  return (h ^ (h >>> 16)) >>> 0;
+}
 
 // ─── Sprite loading ───────────────────────────────────────────────────────────
 function loadSprites() {
@@ -265,23 +509,28 @@ function isTileVisible(tx, ty)  { return G.visibleTiles.has(`${tx},${ty}`); }
 function isTileRevealed(tx, ty) { return G.revealedTiles.has(`${tx},${ty}`); }
 
 // ─── Camera / Game Loop ───────────────────────────────────────────────────────
-const CAM_SPEED = 0.25;
+const CAM_SPEED_PX = 12;  // pixels per frame
 
 function mapWidth()  { return G.mapTiles?.[0]?.length ?? 100; }
 function mapHeight() { return G.mapTiles?.length        ?? 100; }
-function visibleTilesX() { return Math.ceil((G.canvas?.width  ?? 800) / TILE) + 1; }
-function visibleTilesY() { return Math.ceil((G.canvas?.height ?? 600) / TILE) + 1; }
+
+function clampCamera() {
+  if (!G.canvas) return;
+  const ext = worldExtent();
+  const maxX = Math.max(0, ext.w - G.canvas.width);
+  const maxY = Math.max(0, ext.h - G.canvas.height);
+  G.camSX = Math.max(0, Math.min(maxX, G.camSX));
+  G.camSY = Math.max(0, Math.min(maxY, G.camSY));
+}
 
 function gameLoop() {
   G.animFrameId = requestAnimationFrame(gameLoop);
 
-  // Camera panning
-  const maxCamX = Math.max(0, mapWidth()  - visibleTilesX());
-  const maxCamY = Math.max(0, mapHeight() - visibleTilesY());
-  if (G.keysHeld['a'] || G.keysHeld['ArrowLeft'])  G.camX = Math.max(0, G.camX - CAM_SPEED);
-  if (G.keysHeld['d'] || G.keysHeld['ArrowRight']) G.camX = Math.min(maxCamX, G.camX + CAM_SPEED);
-  if (G.keysHeld['w'] || G.keysHeld['ArrowUp'])    G.camY = Math.max(0, G.camY - CAM_SPEED);
-  if (G.keysHeld['s'] || G.keysHeld['ArrowDown'])  G.camY = Math.min(maxCamY, G.camY + CAM_SPEED);
+  if (G.keysHeld['a'] || G.keysHeld['ArrowLeft'])  G.camSX -= CAM_SPEED_PX;
+  if (G.keysHeld['d'] || G.keysHeld['ArrowRight']) G.camSX += CAM_SPEED_PX;
+  if (G.keysHeld['w'] || G.keysHeld['ArrowUp'])    G.camSY -= CAM_SPEED_PX;
+  if (G.keysHeld['s'] || G.keysHeld['ArrowDown'])  G.camSY += CAM_SPEED_PX;
+  clampCamera();
 
   render();
 }
@@ -291,27 +540,15 @@ function render() {
   const { ctx, canvas, snapshot } = G;
   if (!ctx || !canvas) return;
 
-  ctx.clearRect(0, 0, canvas.width, canvas.height);
-
-  const camTX = Math.floor(G.camX);
-  const camTY = Math.floor(G.camY);
-  const subX  = (G.camX - camTX) * TILE;
-  const subY  = (G.camY - camTY) * TILE;
+  ctx.fillStyle = '#0a0a08';
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
 
   ctx.save();
-  // Translate by full camera position in pixels (world → screen space)
-  ctx.translate(-camTX * TILE - subX, -camTY * TILE - subY);
+  ctx.translate(-G.camSX, -G.camSY);
 
-  renderTiles(camTX, camTY);
-
-  if (snapshot) {
-    renderResourceNodes(snapshot, camTX, camTY);
-    renderTownCenters(snapshot, camTX, camTY);
-    renderPlayerBuildings(snapshot, camTX, camTY);
-    renderVillagers(snapshot, camTX, camTY);
-  }
-
-  renderFog(camTX, camTY);
+  renderTiles();
+  if (snapshot) renderEntitiesSorted(snapshot);
+  renderFog();
   renderBuildingGhost();
 
   ctx.restore();
@@ -319,488 +556,744 @@ function render() {
   renderMinimap();
 }
 
-// ── Tiles ────────────────────────────────────────────────────────────────────
-function renderTiles(camTX, camTY) {
-  const { ctx, mapTiles } = G;
-  const vx = visibleTilesX() + 1;
-  const vy = visibleTilesY() + 1;
+// View culling helpers — given a tile or footprint, is any part on screen?
+function isTileInView(tx, ty, padPx = 0) {
+  const { sx, sy } = worldToScreen(tx, ty);
+  const left = G.camSX - padPx;
+  const top  = G.camSY - padPx;
+  const right  = G.camSX + G.canvas.width  + padPx;
+  const bottom = G.camSY + G.canvas.height + padPx;
+  return sx + TILE_W / 2 >= left && sx - TILE_W / 2 <= right
+      && sy + TILE_H >= top && sy <= bottom;
+}
 
-  if (!mapTiles) {
-    ctx.fillStyle = '#1a2010';
-    ctx.fillRect(0, 0, G.canvas.width + TILE, G.canvas.height + TILE);
+// ── Tiles ────────────────────────────────────────────────────────────────────
+function renderTiles() {
+  const { ctx, mapTiles } = G;
+  if (!mapTiles) return;
+  const mh = mapHeight();
+  const mw = mapWidth();
+
+  // Iterate in painter's order (back-to-front by tx+ty) so cliff-edges look right.
+  // 60×60 = 3600 tiles, drawImage is cheap; per-tile cull avoids off-screen work.
+  for (let s = 0; s <= mw + mh - 2; s++) {
+    const tyMin = Math.max(0, s - (mw - 1));
+    const tyMax = Math.min(mh - 1, s);
+    for (let ty = tyMin; ty <= tyMax; ty++) {
+      const tx = s - ty;
+      if (!isTileInView(tx, ty, TILE_W)) continue;
+
+      const { sx, sy } = worldToScreen(tx, ty);
+      const tile = mapTiles[ty]?.[tx] ?? 'grass';
+      const h = tileHash(tx, ty);
+
+      if (tile === 'water') {
+        drawWaterIso(ctx, sx, sy, tx, ty);
+      } else if (tile === 'dirt') {
+        const variants = G.terrainSprites.dirt;
+        if (variants.length) ctx.drawImage(variants[h % variants.length], sx - TILE_W / 2, sy);
+      } else {
+        const variants = G.terrainSprites.grass;
+        if (variants.length) ctx.drawImage(variants[h % variants.length], sx - TILE_W / 2, sy);
+      }
+    }
+  }
+}
+
+// Diamond-clipped animated water for a single iso tile.
+function drawWaterIso(ctx, sx, sy, tx, ty) {
+  const t = Date.now() / 1800;
+  const left   = sx - TILE_W / 2;
+  const top    = sy;
+  ctx.save();
+
+  // Diamond clip
+  ctx.beginPath();
+  ctx.moveTo(sx, sy);
+  ctx.lineTo(sx + TILE_W / 2, sy + TILE_H / 2);
+  ctx.lineTo(sx, sy + TILE_H);
+  ctx.lineTo(sx - TILE_W / 2, sy + TILE_H / 2);
+  ctx.closePath();
+  ctx.clip();
+
+  ctx.fillStyle = '#15314f';
+  ctx.fillRect(left, top, TILE_W, TILE_H);
+
+  const wave = Math.sin(t + tx * 0.18 + ty * 0.12) * 18;
+  const mid = Math.round(72 + wave);
+  ctx.fillStyle = `rgb(28,${50 + Math.round(wave / 2)},${mid})`;
+  ctx.fillRect(left, top + 3, TILE_W, TILE_H - 6);
+
+  // Ripples
+  ctx.fillStyle = 'rgba(180,220,255,0.10)';
+  for (let i = 0; i < 2; i++) {
+    const off = ((t * 12 + i * 7 + tx * 3) % TILE_W);
+    ctx.fillRect(left + off, top + 6 + i * (TILE_H / 3), TILE_W * 0.4, 1);
+  }
+
+  // Foam
+  const foamPhase = (Math.sin(t * 1.5 + tx + ty) + 1) / 2;
+  ctx.fillStyle = `rgba(220,240,255,${0.12 + foamPhase * 0.18})`;
+  ctx.fillRect(left + 4, top + Math.round(TILE_H / 2), TILE_W - 8, 1);
+
+  ctx.restore();
+}
+
+// ── Depth-sorted entity rendering ────────────────────────────────────────────
+function renderEntitiesSorted(snapshot) {
+  const list = [];
+
+  for (const node of snapshot.resourceNodes) {
+    if (!isTileRevealed(node.position.x, node.position.y)) continue;
+    if (!isTileInView(node.position.x, node.position.y, TILE_W)) continue;
+    list.push({ kind: 'resource', payload: node, depth: node.position.x + node.position.y });
+  }
+
+  for (const tc of snapshot.townCenters) {
+    const ax = tc.anchorPosition.x, ay = tc.anchorPosition.y;
+    const isOwn = tc.ownerId === G.playerId;
+    if (!isOwn && !isTileRevealed(ax + 1, ay + 1)) continue;
+    if (!isTileInView(ax + 1, ay + 1, TILE_W * 3)) continue;
+    list.push({ kind: 'tc', payload: tc, depth: ax + 2 + ay + 2 });
+  }
+
+  for (const b of snapshot.playerBuildings ?? []) {
+    const isOwn = b.ownerId === G.playerId;
+    if (!isOwn && !isTileRevealed(b.x, b.y)) continue;
+    if (!isTileInView(b.x + (b.width - 1) / 2, b.y + (b.height - 1) / 2, TILE_W * 2)) continue;
+    list.push({ kind: 'building', payload: b, depth: b.x + (b.width - 1) + b.y + (b.height - 1) });
+  }
+
+  for (const v of snapshot.villagers) {
+    const isOwn = v.ownerId === G.playerId;
+    if (!isOwn && !isTileVisible(v.position.x, v.position.y)) continue;
+    if (!isTileInView(v.position.x, v.position.y, TILE_W)) continue;
+    list.push({ kind: 'villager', payload: v, depth: v.position.x + v.position.y + 0.5 });
+  }
+
+  list.sort((a, b) => a.depth - b.depth);
+
+  for (const item of list) {
+    if      (item.kind === 'resource') renderResourceNode(item.payload);
+    else if (item.kind === 'tc')       renderTownCenter(snapshot, item.payload);
+    else if (item.kind === 'building') renderPlayerBuilding(snapshot, item.payload);
+    else if (item.kind === 'villager') renderVillager(snapshot, item.payload);
+  }
+}
+
+// ── Single-resource node (upright billboard at iso ground center) ────────────
+function renderResourceNode(node) {
+  const ctx = G.ctx;
+  const { sx, sy } = worldToScreen(node.position.x, node.position.y);
+  const cx = sx;                          // diamond mid-x
+  const cy = sy + TILE_H / 2;             // ground center
+
+  ctx.save();
+  ctx.translate(cx, cy);
+  ctx.scale(SPRITE_SCALE, SPRITE_SCALE);
+  switch (node.type) {
+    case 'gold':       drawGoldMine(ctx, 0, 0);    break;
+    case 'stone':      drawStoneQuarry(ctx, 0, 0); break;
+    case 'wood':       drawTree(ctx, 0, 0);        break;
+    case 'food_deer':  drawDeer(ctx, 0, 0);        break;
+    case 'food_berry': drawBerryBush(ctx, 0, 0);   break;
+  }
+  ctx.restore();
+
+  // Remaining bar — under the ground center
+  const maxAmt = { gold: 600, stone: 500, wood: 400, food_deer: 300, food_berry: 250 };
+  const pct = node.remaining / (maxAmt[node.type] ?? 500);
+  const barW = TILE_W * 0.55;
+  const barX = cx - barW / 2;
+  const barY = cy + TILE_H / 2 - 4;
+  ctx.fillStyle = 'rgba(0,0,0,0.55)';
+  ctx.fillRect(barX, barY, barW, 3);
+  ctx.fillStyle = pct > 0.5 ? '#60d040' : pct > 0.2 ? '#d0a040' : '#d04040';
+  ctx.fillRect(barX, barY, Math.round(barW * pct), 3);
+}
+
+// ── 3D iso-box helper: draws a footprint as raised walls + flat roof ────────
+// Footprint is the world-space rectangle (ax, ay) → (ax+w, ay+h).
+// `height` is wall height in screen pixels (positive = taller).
+function draw3DBox(ax, ay, w, h, height, colors) {
+  const ctx = G.ctx;
+  // Diamond corners of the footprint on the ground
+  const top    = worldToScreen(ax,     ay);
+  const right  = worldToScreen(ax + w, ay);
+  const bottom = worldToScreen(ax + w, ay + h);
+  const left   = worldToScreen(ax,     ay + h);
+  // Roof corners (raised by `height` screen pixels)
+  const tR = { sx: top.sx,    sy: top.sy    - height };
+  const rR = { sx: right.sx,  sy: right.sy  - height };
+  const bR = { sx: bottom.sx, sy: bottom.sy - height };
+  const lR = { sx: left.sx,   sy: left.sy   - height };
+
+  // Right wall (between `right` and `bottom`, lit side)
+  if (colors.wallRight) {
+    ctx.fillStyle = colors.wallRight;
+    ctx.beginPath();
+    ctx.moveTo(right.sx,  right.sy);
+    ctx.lineTo(bottom.sx, bottom.sy);
+    ctx.lineTo(bR.sx,     bR.sy);
+    ctx.lineTo(rR.sx,     rR.sy);
+    ctx.closePath();
+    ctx.fill();
+    if (colors.outline) {
+      ctx.strokeStyle = colors.outline;
+      ctx.lineWidth = 1;
+      ctx.stroke();
+    }
+  }
+  // Left wall (between `left` and `bottom`, shadowed side)
+  if (colors.wallLeft) {
+    ctx.fillStyle = colors.wallLeft;
+    ctx.beginPath();
+    ctx.moveTo(left.sx,   left.sy);
+    ctx.lineTo(bottom.sx, bottom.sy);
+    ctx.lineTo(bR.sx,     bR.sy);
+    ctx.lineTo(lR.sx,     lR.sy);
+    ctx.closePath();
+    ctx.fill();
+    if (colors.outline) {
+      ctx.strokeStyle = colors.outline;
+      ctx.lineWidth = 1;
+      ctx.stroke();
+    }
+  }
+  // Roof diamond
+  if (colors.roof) {
+    ctx.fillStyle = colors.roof;
+    ctx.beginPath();
+    ctx.moveTo(tR.sx, tR.sy);
+    ctx.lineTo(rR.sx, rR.sy);
+    ctx.lineTo(bR.sx, bR.sy);
+    ctx.lineTo(lR.sx, lR.sy);
+    ctx.closePath();
+    ctx.fill();
+    if (colors.outline) {
+      ctx.strokeStyle = colors.outline;
+      ctx.lineWidth = 1;
+      ctx.stroke();
+    }
+  }
+
+  return { top, right, bottom, left, tR, rR, bR, lR };
+}
+
+// Outline a footprint diamond at ground level (for selection / construction).
+function outlineFootprint(ax, ay, w, h, stroke, dash) {
+  const ctx = G.ctx;
+  const top    = worldToScreen(ax,     ay);
+  const right  = worldToScreen(ax + w, ay);
+  const bottom = worldToScreen(ax + w, ay + h);
+  const left   = worldToScreen(ax,     ay + h);
+  ctx.save();
+  ctx.strokeStyle = stroke;
+  ctx.lineWidth = 1.5;
+  if (dash) ctx.setLineDash(dash);
+  ctx.beginPath();
+  ctx.moveTo(top.sx, top.sy);
+  ctx.lineTo(right.sx, right.sy);
+  ctx.lineTo(bottom.sx, bottom.sy);
+  ctx.lineTo(left.sx, left.sy);
+  ctx.closePath();
+  ctx.stroke();
+  ctx.restore();
+}
+
+// ── Town Center (3×3, Kenney wall sprites + procedural flat roof) ───────────
+// Walls come from the Kenney pack — only the camera-facing faces are drawn
+// (S front and E right; the back N/W walls would be hidden behind them anyway).
+// On top we draw a procedural flat plank roof + a sprite chimney + flag.
+// `drawIsoPiece` anchors each 256×512 piece so the image bottom lands on the
+// world tile's south corner (the convention from Kenney's iso pack).
+function renderTownCenter(snapshot, tc) {
+  const ctx = G.ctx;
+  const ax = tc.anchorPosition.x;
+  const ay = tc.anchorPosition.y;
+  const isOwn = tc.ownerId === G.playerId;
+  const playerIdx = snapshot.players.findIndex(p => p.id === tc.ownerId);
+  const playerColor = COLORS.tc[playerIdx] ?? '#888';
+
+  // Fallback to procedural keep if the sprite pack isn't ready yet
+  if (!G.buildingSprites?.woodWall_S) {
+    draw3DBox(ax, ay, 3, 3, TILE_W * 0.95, {
+      wallRight: '#9a6f44', wallLeft: '#5a3818',
+      roof: '#8a6238', outline: 'rgba(40,24,12,0.85)',
+    });
     return;
   }
 
-  for (let dy = 0; dy < vy; dy++) {
-    const ty = camTY + dy;
-    if (ty < 0 || ty >= mapHeight()) continue;
-    for (let dx = 0; dx < vx; dx++) {
-      const tx = camTX + dx;
-      if (tx < 0 || tx >= mapWidth()) continue;
+  // East face — Kenney's woodWall_E is placed on the WEST edge of its tile,
+  // so to get the wall on the BUILDING's outer east edge we anchor one column
+  // beyond the footprint (ax+3).
+  for (let dy = 0; dy < 3; dy++) {
+    const piece = dy === 1 ? 'woodWallWindow_E' : 'woodWall_E';
+    drawIsoPiece(piece, ax + 3, ay + dy);
+  }
+  // South face — woodWall_S is placed on the NORTH edge of its tile, so for the
+  // building's outer south edge we anchor one row beyond (ay+3).
+  for (let dx = 0; dx < 3; dx++) {
+    const piece = dx === 1 ? 'woodWallDoor_S'
+                  : dx === 0 ? 'woodWallWindow_S'
+                  : 'woodWall_S';
+    drawIsoPiece(piece, ax + dx, ay + 3);
+  }
 
-      const px = tx * TILE;
-      const py = ty * TILE;
-      const tile = mapTiles[ty]?.[tx] ?? 'grass';
-
-      if (tile === 'water') {
-        drawWater(ctx, px, py, tx, ty);
-      } else if (tile === 'dirt') {
-        ctx.fillStyle = COLORS.tiles.dirt[(tx + ty * 3) % 4];
-        ctx.fillRect(px, py, TILE, TILE);
-        ctx.fillStyle = 'rgba(0,0,0,0.08)';
-        ctx.fillRect(px + 4, py + 4, 3, 3);
-        ctx.fillRect(px + TILE - 7, py + TILE - 7, 2, 2);
-      } else {
-        ctx.fillStyle = COLORS.tiles.grass[(tx * 2 + ty) % 4];
-        ctx.fillRect(px, py, TILE, TILE);
-        // Subtle grass detail
-        ctx.fillStyle = 'rgba(0,0,0,0.05)';
-        if ((tx + ty) % 3 === 0) ctx.fillRect(px + 6, py + 3, 2, 5);
-        if ((tx * ty) % 5 === 0) ctx.fillRect(px + TILE - 6, py + TILE - 6, 2, 4);
-      }
+  // Hipped roof composed from Kenney pieces, lifted by one wall-height so it
+  // sits ON TOP of the walls. Corners at the 4 footprint corners, sloped pieces
+  // at the 4 edge mid-tiles, apex covered by adjacent pieces.
+  const ROOF_LIFT = -TILE_W * 0.575;  // one wall-height (calibrated visually)
+  const roofTiles = [];
+  for (let dy = 0; dy < 3; dy++) {
+    for (let dx = 0; dx < 3; dx++) {
+      roofTiles.push({ tx: ax + dx, ty: ay + dy, dx, dy });
     }
   }
-}
+  roofTiles.sort((a, b) => (a.tx + a.ty) - (b.tx + b.ty));
 
-function drawWater(ctx, px, py, tx, ty) {
-  const t = Date.now() / 2500;
-  const wave = Math.sin(t + tx * 0.08 + ty * 0.06) * 10;
-  const b = Math.round(90 + wave);
-  ctx.fillStyle = `rgb(25,55,${b})`;
-  ctx.fillRect(px, py, TILE, TILE);
-  ctx.fillStyle = 'rgba(255,255,255,0.06)';
-  ctx.fillRect(px + 3, py + TILE / 2, TILE - 6, 2);
-}
-
-// ── Resources ────────────────────────────────────────────────────────────────
-function renderResourceNodes(snapshot, camTX, camTY) {
-  const { ctx } = G;
-  for (const node of snapshot.resourceNodes) {
-    const tx = node.position.x;
-    const ty = node.position.y;
-    if (!isInView(tx, ty, camTX, camTY)) continue;
-    // Show resource if tile was ever revealed (last-known-state behavior)
-    if (!isTileRevealed(tx, ty)) continue;
-
-    const px = tx * TILE;
-    const py = ty * TILE;
-    const cx = px + TILE / 2;
-    const cy = py + TILE / 2;
-
-    switch (node.type) {
-      case 'gold':       drawGoldMine(ctx, cx, cy);   break;
-      case 'stone':      drawStoneQuarry(ctx, cx, cy); break;
-      case 'wood':       drawTree(ctx, cx, cy);        break;
-      case 'food_deer':  drawDeer(ctx, cx, cy);        break;
-      case 'food_berry': drawBerryBush(ctx, cx, cy);   break;
-    }
-
-    // Remaining amount bar
-    const maxAmt = { gold: 600, stone: 500, wood: 400, food_deer: 300, food_berry: 250 };
-    const pct = node.remaining / (maxAmt[node.type] ?? 500);
-    ctx.fillStyle = 'rgba(0,0,0,0.55)';
-    ctx.fillRect(px + 1, py + TILE - 5, TILE - 2, 4);
-    ctx.fillStyle = pct > 0.5 ? '#60d040' : pct > 0.2 ? '#d0a040' : '#d04040';
-    ctx.fillRect(px + 1, py + TILE - 5, Math.round((TILE - 2) * pct), 4);
+  for (const { tx, ty, dx, dy } of roofTiles) {
+    let piece = null;
+    if      (dx === 0 && dy === 0) piece = 'roofCorner_W';
+    else if (dx === 2 && dy === 0) piece = 'roofCorner_N';
+    else if (dx === 0 && dy === 2) piece = 'roofCorner_S';
+    else if (dx === 2 && dy === 2) piece = 'roofCorner_E';
+    else if (dx === 1 && dy === 0) continue;  // skip back-right slope
+    else if (dx === 0 && dy === 1) continue;  // skip back-left slope
+    else if (dx === 2)             piece = 'roof_N';
+    else if (dy === 2)             piece = 'roof_E';
+    else                           piece = 'roofCorner_E';  // center (1,1) apex
+    const lift = (dx === 1 && dy === 1) ? ROOF_LIFT - TILE_W * 0.56 : ROOF_LIFT;
+    drawIsoPiece(piece, tx, ty, lift);
   }
-}
 
-// ── Town Centers ─────────────────────────────────────────────────────────────
-function renderTownCenters(snapshot, camTX, camTY) {
-  const { ctx } = G;
-  for (const tc of snapshot.townCenters) {
-    const ax = tc.anchorPosition.x;
-    const ay = tc.anchorPosition.y;
-    // Enemy TC: hide if never revealed; show even in shroud (buildings are permanent)
-    const isOwn = tc.ownerId === G.playerId;
-    if (!isOwn && !isTileRevealed(ax + 1, ay + 1)) continue;
-    if (!isInView(ax, ay, camTX, camTY)) continue;
+  // Chimney sticks up from the roof near the back-right corner
+  drawIsoPiece('chimneyBase_N', ax + 2, ay, ROOF_LIFT);
+  drawIsoPiece('chimneyTop_N',  ax + 2, ay, ROOF_LIFT - TILE_W * 0.22);
 
-    const px = ax * TILE;
-    const py = ay * TILE;
-    const playerIdx = snapshot.players.findIndex(p => p.id === tc.ownerId);
-    const color = COLORS.tc[playerIdx] ?? '#888';
+  // Player flag near the apex of the roof — anchor at center tile, lifted by
+  // the wall height so the flagpole rises from the roof peak.
+  const flagLift = TILE_W * 1.1;
+  const flagAt = worldToScreen(ax + 1, ay + 1);
+  flagAt.sy -= flagLift;
+  ctx.strokeStyle = '#3a2810';
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.moveTo(flagAt.sx, flagAt.sy);
+  ctx.lineTo(flagAt.sx, flagAt.sy - 26);
+  ctx.stroke();
+  ctx.fillStyle = playerColor;
+  ctx.beginPath();
+  ctx.moveTo(flagAt.sx, flagAt.sy - 26);
+  ctx.lineTo(flagAt.sx + 16, flagAt.sy - 22);
+  ctx.lineTo(flagAt.sx, flagAt.sy - 17);
+  ctx.closePath();
+  ctx.fill();
 
-    // Shadow
-    ctx.fillStyle = 'rgba(0,0,0,0.3)';
-    ctx.fillRect(px + 5, py + 5, TILE * 3, TILE * 3);
+  // Player name above flag
+  const pName = snapshot.players[playerIdx]?.name ?? '';
+  ctx.fillStyle = '#fff';
+  ctx.strokeStyle = 'rgba(0,0,0,0.8)';
+  ctx.lineWidth = 3;
+  ctx.font = `bold ${Math.round(11 * SPRITE_SCALE)}px Georgia`;
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'bottom';
+  ctx.strokeText(pName.substring(0, 12), flagAt.sx, flagAt.sy - 30);
+  ctx.fillText(pName.substring(0, 12), flagAt.sx, flagAt.sy - 30);
 
-    // Stone wall
-    ctx.fillStyle = '#6a5040';
-    ctx.fillRect(px, py, TILE * 3, TILE * 3);
+  // HP bar above the apex of the roof
+  if (tc.hp < tc.maxHp) {
+    const barW = TILE_W * 2;
+    const pct  = tc.hp / tc.maxHp;
+    const barX = flagAt.sx - barW / 2;
+    const barY = flagAt.sy - 44;
+    ctx.fillStyle = 'rgba(0,0,0,0.6)';
+    ctx.fillRect(barX, barY, barW, 5);
+    ctx.fillStyle = pct > 0.5 ? '#50e040' : pct > 0.25 ? '#e0c040' : '#e04040';
+    ctx.fillRect(barX, barY, Math.round(barW * pct), 5);
+  }
 
-    // Wall texture
-    ctx.fillStyle = '#7a6050';
-    for (let i = 0; i < 3; i++) {
-      ctx.fillRect(px + i * TILE + 3, py + 3, TILE - 7, TILE - 5);
-      ctx.fillRect(px + i * TILE + 3, py + TILE * 2 + 5, TILE - 7, TILE - 7);
-    }
-
-    // Central keep
-    ctx.fillStyle = '#5a4030';
-    ctx.fillRect(px + 5, py + 5, TILE * 3 - 10, TILE * 3 - 10);
-
-    // Colored roof
-    ctx.fillStyle = color;
-    ctx.globalAlpha = 0.7;
-    ctx.fillRect(px + 8, py + 8, TILE * 3 - 16, TILE * 3 - 16);
-    ctx.globalAlpha = 1;
-
-    // Flag
-    ctx.fillStyle = color;
-    ctx.fillRect(px + TILE + 10, py - 8, 2, 12);
-    ctx.fillRect(px + TILE + 12, py - 8, 9, 7);
-
-    // Door
-    ctx.fillStyle = '#3a2810';
-    ctx.fillRect(px + TILE + 6, py + TILE * 2 + 1, 8, 12);
-
-    // Name
-    const pName = snapshot.players[playerIdx]?.name ?? '';
+  // Training progress at the front (south corner)
+  if (tc.isTraining && isOwn) {
+    const unitTicks = { villager: 20, archer: 24, cavalry: 40 };
+    const totalTicks = unitTicks[tc.trainingUnitType] ?? 20;
+    const pct = 1 - tc.trainTicksRemaining / totalTicks;
+    const south = worldToScreen(ax + 3, ay + 3);
+    const barW = TILE_W * 1.5;
+    const barX = south.sx - barW / 2;
+    const barY = south.sy + 6;
+    ctx.fillStyle = 'rgba(0,0,0,0.5)';
+    ctx.fillRect(barX, barY, barW, 6);
+    ctx.fillStyle = '#60c040';
+    ctx.fillRect(barX, barY, Math.round(barW * pct), 6);
     ctx.fillStyle = '#fff';
-    ctx.font = 'bold 9px Georgia';
+    ctx.font = `${Math.round(9 * SPRITE_SCALE)}px Georgia`;
     ctx.textAlign = 'center';
-    ctx.textBaseline = 'middle';
-    ctx.fillText(pName.substring(0, 9), px + TILE * 1.5, py + TILE * 1.5);
-
-    // HP bar
-    if (tc.hp < tc.maxHp) {
-      const barW = TILE * 3;
-      const pct  = tc.hp / tc.maxHp;
-      ctx.fillStyle = 'rgba(0,0,0,0.6)';
-      ctx.fillRect(px, py - 7, barW, 5);
-      ctx.fillStyle = pct > 0.5 ? '#50e040' : pct > 0.25 ? '#e0c040' : '#e04040';
-      ctx.fillRect(px, py - 7, Math.round(barW * pct), 5);
-    }
-
-    // Training progress
-    if (tc.isTraining && isOwn) {
-      const unitTicks = { villager:20, archer:24, cavalry:40 };
-      const totalTicks = unitTicks[tc.trainingUnitType] ?? 20;
-      const pct = 1 - tc.trainTicksRemaining / totalTicks;
-      ctx.fillStyle = 'rgba(0,0,0,0.5)';
-      ctx.fillRect(px, py + TILE * 3 + 2, TILE * 3, 6);
-      ctx.fillStyle = '#60c040';
-      ctx.fillRect(px, py + TILE * 3 + 2, Math.round(TILE * 3 * pct), 6);
-      ctx.fillStyle = '#fff';
-      ctx.font = '8px Georgia';
-      ctx.fillText('Treinando...', px + TILE * 1.5, py + TILE * 3 + 13);
-    }
+    ctx.fillText('Treinando...', south.sx, barY + 18);
   }
 }
 
-// ── Villagers ────────────────────────────────────────────────────────────────
-function renderVillagers(snapshot, camTX, camTY) {
-  const { ctx } = G;
-  for (const v of snapshot.villagers) {
-    const isOwn = v.ownerId === G.playerId;
-    // Enemy villagers only visible in current vision; own units always visible
-    if (!isOwn && !isTileVisible(v.position.x, v.position.y)) continue;
-    if (!isInView(v.position.x, v.position.y, camTX, camTY)) continue;
+// ── Villager (upright billboard at iso ground center) ──────────────────────
+function renderVillager(snapshot, v) {
+  const ctx = G.ctx;
+  const { sx, sy } = worldToScreen(v.position.x, v.position.y);
+  const cx = sx;                  // x at the diamond center
+  const cy = sy + TILE_H / 2;     // ground-plane y (where feet land)
+  const SPRITE_H = TILE_W * 0.85; // upright sprite height
 
-    const cx = v.position.x * TILE + TILE / 2;
-    const cy = v.position.y * TILE + TILE / 2;
-    const isSelected = G.selectedIds.has(v.id);
-    const playerIdx  = snapshot.players.findIndex(p => p.id === v.ownerId);
+  const isOwn      = v.ownerId === G.playerId;
+  const isSelected = G.selectedIds.has(v.id);
+  const playerIdx  = snapshot.players.findIndex(p => p.id === v.ownerId);
 
-    // Movement path line
-    if (isSelected && v.state === 'moving' && v.moveTarget) {
-      const tx = v.moveTarget.x * TILE + TILE / 2;
-      const ty = v.moveTarget.y * TILE + TILE / 2;
-      ctx.strokeStyle = COLORS.moveTarget;
-      ctx.lineWidth = 2;
-      ctx.setLineDash([4, 4]);
+  // Movement path line (target → iso)
+  if (isSelected && v.state === 'moving' && v.moveTarget) {
+    const t = worldToScreen(v.moveTarget.x, v.moveTarget.y);
+    ctx.strokeStyle = COLORS.moveTarget;
+    ctx.lineWidth = 2;
+    ctx.setLineDash([4, 4]);
+    ctx.beginPath();
+    ctx.moveTo(cx, cy);
+    ctx.lineTo(t.sx, t.sy + TILE_H / 2);
+    ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.strokeStyle = COLORS.selected;
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.arc(t.sx, t.sy + TILE_H / 2, 5, 0, Math.PI * 2);
+    ctx.stroke();
+  }
+  // Gather line
+  if (isSelected && v.state === 'gathering' && v.gatherTarget) {
+    const node = snapshot.resourceNodes.find(n => n.id === v.gatherTarget);
+    if (node) {
+      const t = worldToScreen(node.position.x, node.position.y);
+      ctx.strokeStyle = COLORS.gatherTarget;
+      ctx.lineWidth = 1.5;
+      ctx.setLineDash([2, 5]);
       ctx.beginPath();
       ctx.moveTo(cx, cy);
-      ctx.lineTo(tx, ty);
+      ctx.lineTo(t.sx, t.sy + TILE_H / 2);
       ctx.stroke();
       ctx.setLineDash([]);
-      // Destination marker
-      ctx.strokeStyle = COLORS.selected;
-      ctx.lineWidth = 1.5;
-      ctx.beginPath();
-      ctx.arc(tx, ty, 5, 0, Math.PI * 2);
-      ctx.stroke();
     }
+  }
 
-    // Gather line
-    if (isSelected && v.state === 'gathering' && v.gatherTarget) {
-      const node = snapshot.resourceNodes.find(n => n.id === v.gatherTarget);
-      if (node) {
-        const tx = node.position.x * TILE + TILE / 2;
-        const ty = node.position.y * TILE + TILE / 2;
-        ctx.strokeStyle = COLORS.gatherTarget;
-        ctx.lineWidth = 1.5;
-        ctx.setLineDash([2, 5]);
-        ctx.beginPath();
-        ctx.moveTo(cx, cy);
-        ctx.lineTo(tx, ty);
-        ctx.stroke();
-        ctx.setLineDash([]);
-      }
-    }
-
-    // Selection ring
-    if (isSelected) {
-      ctx.strokeStyle = COLORS.selected;
-      ctx.lineWidth = 2.5;
-      ctx.beginPath();
-      ctx.arc(cx, cy + 2, TILE / 2 - 1, 0, Math.PI * 2);
-      ctx.stroke();
-    }
-
-    // Shadow
-    ctx.fillStyle = 'rgba(0,0,0,0.2)';
+  // Iso selection ring (flat ellipse on the ground)
+  if (isSelected) {
+    ctx.strokeStyle = COLORS.selected;
+    ctx.lineWidth = 2;
     ctx.beginPath();
-    ctx.ellipse(cx + 1, cy + TILE / 2 - 3, 6, 3, 0, 0, Math.PI * 2);
-    ctx.fill();
+    ctx.ellipse(cx, cy, TILE_W * 0.35, TILE_H * 0.35, 0, 0, Math.PI * 2);
+    ctx.stroke();
+  }
 
-    // Draw unit based on type
-    const pColor = COLORS.villager[playerIdx] ?? '#888';
-    if (v.unitType === 'archer') {
-      drawArcher(ctx, cx, cy, pColor);
-    } else if (v.unitType === 'cavalry') {
-      drawCavalry(ctx, cx, cy, pColor);
+  // Ground shadow
+  ctx.fillStyle = 'rgba(0,0,0,0.25)';
+  ctx.beginPath();
+  ctx.ellipse(cx + 1, cy + 1, TILE_W * 0.20, TILE_H * 0.30, 0, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Unit body — drawn upright above ground center
+  const pColor = COLORS.villager[playerIdx] ?? '#888';
+  const headY = cy - SPRITE_H * 0.5;  // approximate head position for HP bar
+  if (v.unitType === 'archer') {
+    ctx.save();
+    ctx.translate(cx, cy - SPRITE_H * 0.35);
+    ctx.scale(SPRITE_SCALE, SPRITE_SCALE);
+    drawArcher(ctx, 0, 0, pColor);
+    ctx.restore();
+  } else if (v.unitType === 'cavalry') {
+    ctx.save();
+    ctx.translate(cx, cy - SPRITE_H * 0.30);
+    ctx.scale(SPRITE_SCALE, SPRITE_SCALE);
+    drawCavalry(ctx, 0, 0, pColor);
+    ctx.restore();
+  } else {
+    const sprite = spriteForVillager(v);
+    if (sprite && sprite.complete && sprite.naturalWidth > 0) {
+      const w = TILE_W * 0.75;
+      const h = w;
+      ctx.drawImage(sprite, cx - w / 2, cy - h * 0.95, w, h);
+      // Player color stripe under the sprite (foot mark)
+      ctx.fillStyle = pColor;
+      ctx.fillRect(cx - 5 * SPRITE_SCALE, cy - 2, 10 * SPRITE_SCALE, 2);
     } else {
-      // Villager: sprite or fallback
-      const sprite = spriteForVillager(v);
-      if (sprite && sprite.complete && sprite.naturalWidth > 0) {
-        const size = TILE - 2;
-        ctx.drawImage(sprite, cx - size / 2, cy - size / 2 - 2, size, size);
-        ctx.fillStyle = pColor;
-        ctx.fillRect(cx - 4, cy + TILE / 2 - 6, 8, 3);
-      } else {
-        ctx.fillStyle = pColor;
-        ctx.beginPath(); ctx.arc(cx, cy + 1, 7, 0, Math.PI * 2); ctx.fill();
-        ctx.fillStyle = '#d4a070';
-        ctx.beginPath(); ctx.arc(cx, cy - 5, 5, 0, Math.PI * 2); ctx.fill();
-      }
+      ctx.save();
+      ctx.translate(cx, cy - SPRITE_H * 0.35);
+      ctx.scale(SPRITE_SCALE, SPRITE_SCALE);
+      ctx.fillStyle = pColor;
+      ctx.beginPath(); ctx.arc(0, 1, 7, 0, Math.PI * 2); ctx.fill();
+      ctx.fillStyle = '#d4a070';
+      ctx.beginPath(); ctx.arc(0, -5, 5, 0, Math.PI * 2); ctx.fill();
+      ctx.restore();
     }
-
-    // State indicator dot (own units only)
-    if (isOwn) {
-      const dotColor = v.state === 'gathering'   ? '#60d040'
-        : v.state === 'moving'      ? '#d0d040'
-        : v.state === 'constructing'? '#f0a020'
-        : v.state === 'attacking'   ? '#ff4040'
-        : null;
-      if (dotColor) {
-        ctx.fillStyle = dotColor;
-        ctx.beginPath();
-        ctx.arc(cx + TILE / 2 - 4, cy - TILE / 2 + 4, 3, 0, Math.PI * 2);
-        ctx.fill();
-      }
-    }
-
-    // Health bar (always shown for own units, shown for visible enemies)
-    drawUnitHealthBar(ctx, cx, cy, v.hp, v.maxHp);
   }
-}
 
-function drawUnitHealthBar(ctx, cx, cy, hp, maxHp) {
-  if (hp >= maxHp) return; // full health — hide bar
-  const barW = TILE - 4;
-  const barH = 3;
-  const barX = cx - barW / 2;
-  const barY = cy - TILE / 2 - 6;
-  const pct  = hp / maxHp;
-  ctx.fillStyle = 'rgba(0,0,0,0.7)';
-  ctx.fillRect(barX - 1, barY - 1, barW + 2, barH + 2);
-  ctx.fillStyle = pct > 0.5 ? '#50e040' : pct > 0.25 ? '#e0c040' : '#e04040';
-  ctx.fillRect(barX, barY, Math.round(barW * pct), barH);
-}
-
-// ── Player Buildings ─────────────────────────────────────────────────────────
-function renderPlayerBuildings(snapshot, camTX, camTY) {
-  const { ctx } = G;
-  for (const b of snapshot.playerBuildings ?? []) {
-    const isOwn = b.ownerId === G.playerId;
-    // Show enemy buildings only if tile was revealed
-    if (!isOwn && !isTileRevealed(b.x, b.y)) continue;
-    // Show own buildings always once placed (buildings persist in fog)
-    if (!isInView(b.x, b.y, camTX, camTY)) continue;
-
-    const px = b.x * TILE;
-    const py = b.y * TILE;
-    const def = BUILDING_DEFS[b.type] ?? { color:'#666', width:1, height:1 };
-    const pw = (b.width ?? def.width) * TILE;
-    const ph = (b.height ?? def.height) * TILE;
-    const pidx = snapshot.players.findIndex(p => p.id === b.ownerId);
-    const playerColor = COLORS.tc[pidx] ?? '#888';
-
-    // Shadow
-    ctx.fillStyle = 'rgba(0,0,0,0.3)';
-    ctx.fillRect(px + 4, py + 4, pw, ph);
-
-    switch (b.type) {
-      case 'wall': {
-        // Wall extends above tile so adjacent walls look like a connected rampart
-        const wallH = Math.round(TILE * 1.5);
-        const wallY = py - (wallH - ph);  // extends upward
-        // Shadow
-        ctx.fillStyle = 'rgba(0,0,0,0.35)';
-        ctx.fillRect(px + 4, wallY + 4, pw, wallH);
-        // Base stone body
-        ctx.fillStyle = '#9a8878';
-        ctx.fillRect(px, wallY, pw, wallH);
-        // Stone texture rows
-        ctx.fillStyle = '#b0a090';
-        ctx.fillRect(px + 2, wallY + 3, pw - 4, 5);
-        ctx.fillRect(px + 2, wallY + 11, pw - 4, 5);
-        ctx.fillRect(px + 2, wallY + 19, pw - 4, 5);
-        // Dark mortar lines
-        ctx.fillStyle = '#7a6858';
-        ctx.fillRect(px, wallY + 8, pw, 2);
-        ctx.fillRect(px, wallY + 16, pw, 2);
-        ctx.fillRect(px, wallY + 24, pw, 2);
-        // Battlements at top
-        ctx.fillStyle = '#aaa090';
-        ctx.fillRect(px,           wallY - 6, 8, 8);
-        ctx.fillRect(px + pw - 8,  wallY - 6, 8, 8);
-        // Player color stripe
-        ctx.fillStyle = playerColor;
-        ctx.globalAlpha = 0.35;
-        ctx.fillRect(px + 3, wallY + 3, pw - 6, wallH - 6);
-        ctx.globalAlpha = 1;
-        // Outline
-        ctx.strokeStyle = '#5a4838';
-        ctx.lineWidth = 1.5;
-        ctx.strokeRect(px, wallY, pw, wallH);
-        break;
-      }
-
-      case 'watchtower':
-        ctx.fillStyle = '#8a7860';
-        ctx.fillRect(px + 2, py + 6, pw - 4, ph - 6);
-        // Tower top
-        ctx.fillStyle = '#a09070';
-        ctx.fillRect(px, py, pw, 8);
-        // Battlements
-        ctx.fillStyle = '#b0a080';
-        ctx.fillRect(px, py - 5, 7, 7);
-        ctx.fillRect(px + pw - 7, py - 5, 7, 7);
-        // Arrow slit
-        ctx.fillStyle = '#2a1a08';
-        ctx.fillRect(px + pw/2 - 1, py + 8, 2, 8);
-        // Player flag
-        ctx.fillStyle = playerColor;
-        ctx.fillRect(px + pw/2 - 1, py - 10, 1.5, 8);
-        ctx.fillRect(px + pw/2 + 0.5, py - 10, 7, 5);
-        break;
-
-      case 'lumber_camp':
-        ctx.fillStyle = '#5a7030';
-        ctx.fillRect(px, py, pw, ph);
-        ctx.fillStyle = '#7a9048';
-        ctx.fillRect(px + 4, py + 4, pw - 8, ph - 8);
-        // Log piles
-        ctx.fillStyle = '#8a6040';
-        ctx.fillRect(px + 6, py + 6, pw/2 - 4, ph/2 - 4);
-        ctx.fillStyle = '#7a5030';
-        ctx.fillRect(px + 8, py + 8, pw/2 - 8, 5);
-        ctx.fillRect(px + 8, py + 14, pw/2 - 8, 5);
-        ctx.fillStyle = playerColor;
-        ctx.globalAlpha = 0.5;
-        ctx.fillRect(px + pw - 10, py + 4, 6, 6);
-        ctx.globalAlpha = 1;
-        break;
-
-      case 'gold_mine':
-        ctx.fillStyle = '#7a6840';
-        ctx.fillRect(px, py, pw, ph);
-        ctx.fillStyle = '#c09020';
-        ctx.fillRect(px + 4, py + 4, pw - 8, ph - 8);
-        // Gold vein
-        ctx.fillStyle = '#e8c040';
-        ctx.fillRect(px + 8, py + 8, pw/2 - 4, ph/2 - 4);
-        ctx.fillStyle = '#ffd060';
-        ctx.fillRect(px + 10, py + 10, 6, 6);
-        ctx.fillStyle = playerColor;
-        ctx.globalAlpha = 0.5;
-        ctx.fillRect(px + pw - 10, py + 4, 6, 6);
-        ctx.globalAlpha = 1;
-        break;
-
-      case 'farm':
-        ctx.fillStyle = '#6a8020';
-        ctx.fillRect(px, py, pw, ph);
-        // Crop rows
-        ctx.fillStyle = '#a0c040';
-        for (let row = 0; row < 3; row++) {
-          ctx.fillRect(px + 4, py + 4 + row * (ph / 3.5), pw - 8, (ph / 3.5) - 2);
-        }
-        ctx.fillStyle = '#d0e060';
-        ctx.fillRect(px + 6, py + 6, 6, ph/2 - 4);
-        ctx.fillStyle = playerColor;
-        ctx.globalAlpha = 0.5;
-        ctx.fillRect(px + pw - 10, py + 4, 6, 6);
-        ctx.globalAlpha = 1;
-        break;
-
-      case 'stone_quarry':
-        ctx.fillStyle = '#707070';
-        ctx.fillRect(px, py, pw, ph);
-        ctx.fillStyle = '#909090';
-        ctx.fillRect(px + 4, py + 4, pw - 8, ph - 8);
-        // Stone chunks
-        ctx.fillStyle = '#aaaaaa';
-        ctx.fillRect(px + 6, py + 6, 10, 8);
-        ctx.fillRect(px + 18, py + 10, 8, 6);
-        ctx.fillStyle = '#cccccc';
-        ctx.fillRect(px + 8, py + 8, 5, 4);
-        ctx.fillStyle = playerColor;
-        ctx.globalAlpha = 0.5;
-        ctx.fillRect(px + pw - 10, py + 4, 6, 6);
-        ctx.globalAlpha = 1;
-        break;
-
-      default:
-        ctx.fillStyle = def.color;
-        ctx.fillRect(px, py, pw, ph);
-    }
-
-    // Border
-    ctx.strokeStyle = '#3a2808';
-    ctx.lineWidth = 1;
-    ctx.strokeRect(px, py, pw, ph);
-
-    // HP bar (complete buildings only)
-    if (b.status === 'complete' && b.hp < b.maxHp) {
-      const barW = pw;
-      const pct  = b.hp / b.maxHp;
-      ctx.fillStyle = 'rgba(0,0,0,0.6)';
-      ctx.fillRect(px, py - 6, barW, 4);
-      ctx.fillStyle = pct > 0.5 ? '#50e040' : pct > 0.25 ? '#e0c040' : '#e04040';
-      ctx.fillRect(px, py - 6, Math.round(barW * pct), 4);
-    }
-
-    // Under-construction overlay: scaffolding + progress bar
-    if (b.status === 'under_construction') {
-      // Semi-transparent dark overlay
-      ctx.fillStyle = 'rgba(0,0,0,0.45)';
-      ctx.fillRect(px, py, pw, ph);
-
-      // Scaffolding cross lines
-      ctx.strokeStyle = '#c8a040';
-      ctx.lineWidth = 1.5;
-      ctx.setLineDash([3, 3]);
+  // State indicator dot (own units only)
+  if (isOwn) {
+    const dotColor = v.state === 'gathering'   ? '#60d040'
+      : v.state === 'moving'      ? '#d0d040'
+      : v.state === 'constructing'? '#f0a020'
+      : v.state === 'attacking'   ? '#ff4040'
+      : null;
+    if (dotColor) {
+      ctx.fillStyle = dotColor;
       ctx.beginPath();
-      ctx.moveTo(px, py); ctx.lineTo(px + pw, py + ph);
-      ctx.moveTo(px + pw, py); ctx.lineTo(px, py + ph);
-      ctx.stroke();
-      ctx.setLineDash([]);
-
-      // Progress bar at bottom of footprint
-      const pct = 1 - (b.constructionTicksRemaining / b.constructionTotalTicks);
-      ctx.fillStyle = 'rgba(0,0,0,0.7)';
-      ctx.fillRect(px, py + ph - 5, pw, 5);
-      ctx.fillStyle = pct < 0.5 ? '#d08020' : '#60c040';
-      ctx.fillRect(px, py + ph - 5, Math.round(pw * pct), 5);
+      ctx.arc(cx + TILE_W * 0.20, headY - 4, 3.5, 0, Math.PI * 2);
+      ctx.fill();
     }
+  }
+
+  // Health bar above head
+  if (v.hp < v.maxHp) {
+    const barW = TILE_W * 0.5;
+    const barX = cx - barW / 2;
+    const barY = headY - 8;
+    const pct  = v.hp / v.maxHp;
+    ctx.fillStyle = 'rgba(0,0,0,0.7)';
+    ctx.fillRect(barX - 1, barY - 1, barW + 2, 4);
+    ctx.fillStyle = pct > 0.5 ? '#50e040' : pct > 0.25 ? '#e0c040' : '#e04040';
+    ctx.fillRect(barX, barY, Math.round(barW * pct), 3);
   }
 }
 
-// ── Building Ghost Preview ───────────────────────────────────────────────────
+// ── Player Building (iso 3D boxes by type) ──────────────────────────────────
+function renderPlayerBuilding(snapshot, b) {
+  const ctx = G.ctx;
+  const def = BUILDING_DEFS[b.type] ?? { color:'#666', width:1, height:1 };
+  const w = b.width  ?? def.width;
+  const h = b.height ?? def.height;
+  const pidx = snapshot.players.findIndex(p => p.id === b.ownerId);
+  const playerColor = COLORS.tc[pidx] ?? '#888';
+  const outline = 'rgba(40,28,16,0.7)';
+
+  let topAnchor = null;  // top-most screen point of the rendered structure (for HP bars)
+  let corners;
+
+  switch (b.type) {
+    case 'wall': {
+      // Wall material: 'wood' (initial) or 'stone' (upgraded).
+      // Server may set b.material; default to 'wood'.
+      const material = b.material === 'stone' ? 'stone' : 'wood';
+      const sprite = G.buildingSprites?.[`wall_${material}`];
+      const ground = worldToScreen(b.x + w / 2, b.y + h / 2);
+      const cx = ground.sx;
+      const cy = ground.sy + TILE_H / 2;
+
+      if (sprite) {
+        // The sprite is square (1024×1024); the artwork's foot sits at ~67% down.
+        // Scale so visible width covers the iso footprint plus a small margin.
+        const drawW = TILE_W * w * 1.7;
+        const drawH = drawW;        // 1:1 source aspect
+        const footRatio = 0.70;     // sprite content's ground line fraction
+        const dx = cx - drawW / 2;
+        const dy = cy - drawH * footRatio;
+        ctx.drawImage(sprite, dx, dy, drawW, drawH);
+        topAnchor = { sx: cx, sy: dy + drawH * 0.10 };
+      } else {
+        // Fallback while assets load — procedural box
+        corners = draw3DBox(b.x, b.y, w, h, 50, {
+          wallRight: '#9a8878',
+          wallLeft:  '#6a5848',
+          roof:      '#aaa090',
+          outline,
+        });
+        topAnchor = corners.tR;
+      }
+      break;
+    }
+
+    case 'watchtower': {
+      corners = draw3DBox(b.x, b.y, w, h, 110, {
+        wallRight: '#8a7860',
+        wallLeft:  '#5a4838',
+        roof:      '#a09070',
+        outline,
+      });
+      // Arrow slits on each visible wall
+      const wallSlitR = {
+        x: (corners.right.sx + corners.bottom.sx) / 2,
+        y: (corners.right.sy + corners.bottom.sy) / 2 - 60,
+      };
+      const wallSlitL = {
+        x: (corners.left.sx + corners.bottom.sx) / 2,
+        y: (corners.left.sy + corners.bottom.sy) / 2 - 60,
+      };
+      ctx.fillStyle = '#2a1a08';
+      ctx.fillRect(wallSlitR.x - 1, wallSlitR.y - 5, 2, 10);
+      ctx.fillRect(wallSlitL.x - 1, wallSlitL.y - 5, 2, 10);
+      // Flag pole
+      const cT = corners.tR;
+      ctx.strokeStyle = '#3a2810'; ctx.lineWidth = 2;
+      ctx.beginPath(); ctx.moveTo(cT.sx, cT.sy); ctx.lineTo(cT.sx, cT.sy - 18); ctx.stroke();
+      ctx.fillStyle = playerColor;
+      ctx.beginPath();
+      ctx.moveTo(cT.sx, cT.sy - 18);
+      ctx.lineTo(cT.sx + 12, cT.sy - 14);
+      ctx.lineTo(cT.sx, cT.sy - 10);
+      ctx.closePath();
+      ctx.fill();
+      topAnchor = { sx: cT.sx, sy: cT.sy - 18 };
+      break;
+    }
+
+    case 'lumber_camp': {
+      corners = draw3DBox(b.x, b.y, w, h, 28, {
+        wallRight: '#6a4a28',
+        wallLeft:  '#4a3018',
+        roof:      '#5a7030',
+        outline,
+      });
+      // Log piles on the roof — short brown rectangles
+      const rcx = (corners.tR.sx + corners.bR.sx) / 2;
+      const rcy = (corners.tR.sy + corners.bR.sy) / 2;
+      ctx.fillStyle = '#8a6040';
+      ctx.fillRect(rcx - 16, rcy - 5, 32, 4);
+      ctx.fillRect(rcx - 14, rcy + 1, 28, 4);
+      ctx.fillStyle = '#5a3a18';
+      ctx.fillRect(rcx - 16, rcy - 1, 32, 1);
+      ctx.fillRect(rcx - 14, rcy + 5, 28, 1);
+      // Player banner
+      ctx.fillStyle = playerColor;
+      ctx.fillRect(corners.rR.sx - 8, corners.rR.sy - 4, 6, 8);
+      topAnchor = corners.tR;
+      break;
+    }
+
+    case 'gold_mine': {
+      corners = draw3DBox(b.x, b.y, w, h, 32, {
+        wallRight: '#7a6840',
+        wallLeft:  '#52462a',
+        roof:      '#c09020',
+        outline,
+      });
+      // Gold lump on roof
+      const rcx = (corners.tR.sx + corners.bR.sx) / 2;
+      const rcy = (corners.tR.sy + corners.bR.sy) / 2;
+      ctx.fillStyle = '#e8c040';
+      ctx.beginPath(); ctx.arc(rcx, rcy, 9, 0, Math.PI * 2); ctx.fill();
+      ctx.fillStyle = '#ffd060';
+      ctx.beginPath(); ctx.arc(rcx - 2, rcy - 2, 4, 0, Math.PI * 2); ctx.fill();
+      ctx.fillStyle = playerColor;
+      ctx.fillRect(corners.rR.sx - 8, corners.rR.sy - 4, 6, 8);
+      topAnchor = corners.tR;
+      break;
+    }
+
+    case 'stone_quarry': {
+      corners = draw3DBox(b.x, b.y, w, h, 28, {
+        wallRight: '#909090',
+        wallLeft:  '#5a5a5a',
+        roof:      '#a0a0a0',
+        outline,
+      });
+      // Stone chunks on roof
+      const rcx = (corners.tR.sx + corners.bR.sx) / 2;
+      const rcy = (corners.tR.sy + corners.bR.sy) / 2;
+      ctx.fillStyle = '#bbbbbb';
+      ctx.fillRect(rcx - 12, rcy - 5, 12, 8);
+      ctx.fillRect(rcx + 2,  rcy - 1, 9,  6);
+      ctx.fillStyle = '#dcdcdc';
+      ctx.fillRect(rcx - 10, rcy - 3, 4, 3);
+      ctx.fillStyle = playerColor;
+      ctx.fillRect(corners.rR.sx - 8, corners.rR.sy - 4, 6, 8);
+      topAnchor = corners.tR;
+      break;
+    }
+
+    case 'farm': {
+      // Almost flat — short walls, crop rows visible on the diamond roof
+      corners = draw3DBox(b.x, b.y, w, h, 6, {
+        wallRight: '#5a4020',
+        wallLeft:  '#3a2810',
+        roof:      '#6a8020',
+        outline,
+      });
+      // Crop rows on the diamond roof — three lines parallel to the (x) axis in iso
+      const cT = corners.tR, cR = corners.rR, cB = corners.bR, cL = corners.lR;
+      ctx.strokeStyle = '#a0c040';
+      ctx.lineWidth = 2;
+      for (let i = 1; i <= 3; i++) {
+        const t = i / 4;
+        // Line from edge top→left at fraction t to edge right→bottom at fraction t
+        const ax = cT.sx + (cL.sx - cT.sx) * t;
+        const ay = cT.sy + (cL.sy - cT.sy) * t;
+        const bx = cR.sx + (cB.sx - cR.sx) * t;
+        const by = cR.sy + (cB.sy - cR.sy) * t;
+        ctx.beginPath();
+        ctx.moveTo(ax, ay);
+        ctx.lineTo(bx, by);
+        ctx.stroke();
+      }
+      ctx.fillStyle = playerColor;
+      ctx.fillRect(corners.rR.sx - 5, corners.rR.sy - 3, 5, 6);
+      topAnchor = corners.tR;
+      break;
+    }
+
+    default: {
+      corners = draw3DBox(b.x, b.y, w, h, 30, {
+        wallRight: def.color,
+        wallLeft:  def.color,
+        roof:      def.color,
+        outline,
+      });
+      topAnchor = corners.tR;
+    }
+  }
+
+  // HP bar — above the topmost rendered point
+  if (b.status === 'complete' && b.hp < b.maxHp && topAnchor) {
+    const barW = TILE_W * Math.max(0.6, w * 0.5);
+    const pct  = b.hp / b.maxHp;
+    const barX = topAnchor.sx - barW / 2;
+    const barY = topAnchor.sy - 12;
+    ctx.fillStyle = 'rgba(0,0,0,0.6)';
+    ctx.fillRect(barX, barY, barW, 4);
+    ctx.fillStyle = pct > 0.5 ? '#50e040' : pct > 0.25 ? '#e0c040' : '#e04040';
+    ctx.fillRect(barX, barY, Math.round(barW * pct), 4);
+  }
+
+  // Under-construction overlay: scaffolding + progress bar over the diamond footprint
+  if (b.status === 'under_construction') {
+    const top    = worldToScreen(b.x,     b.y);
+    const right  = worldToScreen(b.x + w, b.y);
+    const bottom = worldToScreen(b.x + w, b.y + h);
+    const left   = worldToScreen(b.x,     b.y + h);
+    ctx.save();
+    // Semi-transparent dark over the projected building
+    ctx.beginPath();
+    ctx.moveTo(top.sx,    top.sy);
+    ctx.lineTo(right.sx,  right.sy);
+    ctx.lineTo(bottom.sx, bottom.sy);
+    ctx.lineTo(left.sx,   left.sy);
+    ctx.closePath();
+    ctx.fillStyle = 'rgba(0,0,0,0.45)';
+    ctx.fill();
+    // Scaffolding diagonals
+    ctx.strokeStyle = '#c8a040';
+    ctx.lineWidth = 1.5;
+    ctx.setLineDash([3, 3]);
+    ctx.beginPath();
+    ctx.moveTo(top.sx,    top.sy);    ctx.lineTo(bottom.sx, bottom.sy);
+    ctx.moveTo(right.sx,  right.sy);  ctx.lineTo(left.sx,   left.sy);
+    ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.restore();
+
+    // Progress bar near the bottom corner of the diamond
+    const pct = 1 - (b.constructionTicksRemaining / b.constructionTotalTicks);
+    const barW = TILE_W * Math.max(0.6, w * 0.5);
+    const barX = bottom.sx - barW / 2;
+    const barY = bottom.sy + 4;
+    ctx.fillStyle = 'rgba(0,0,0,0.7)';
+    ctx.fillRect(barX, barY, barW, 5);
+    ctx.fillStyle = pct < 0.5 ? '#d08020' : '#60c040';
+    ctx.fillRect(barX, barY, Math.round(barW * pct), 5);
+  }
+}
+
+// ── Building Ghost Preview (iso footprint diamond) ──────────────────────────
 function renderBuildingGhost() {
   if (!G.placingBuildingType || !G.ghostTile) return;
   const { ctx } = G;
@@ -811,23 +1304,38 @@ function renderBuildingGhost() {
   const canAfford = canAffordBuilding(G.placingBuildingType);
   const valid = canAfford && isTileRangeWalkable(tx, ty, def.width, def.height);
 
-  ctx.globalAlpha = 0.55;
-  ctx.fillStyle = valid ? '#40c040' : '#c04040';
-  ctx.fillRect(tx * TILE, ty * TILE, def.width * TILE, def.height * TILE);
-  ctx.globalAlpha = 1;
+  const top    = worldToScreen(tx,             ty);
+  const right  = worldToScreen(tx + def.width, ty);
+  const bottom = worldToScreen(tx + def.width, ty + def.height);
+  const left   = worldToScreen(tx,             ty + def.height);
+
+  ctx.save();
+  ctx.beginPath();
+  ctx.moveTo(top.sx,    top.sy);
+  ctx.lineTo(right.sx,  right.sy);
+  ctx.lineTo(bottom.sx, bottom.sy);
+  ctx.lineTo(left.sx,   left.sy);
+  ctx.closePath();
+
+  ctx.fillStyle = valid ? 'rgba(64,200,64,0.45)' : 'rgba(200,64,64,0.45)';
+  ctx.fill();
 
   ctx.strokeStyle = valid ? '#80ff80' : '#ff8080';
   ctx.lineWidth = 2;
   ctx.setLineDash([4, 3]);
-  ctx.strokeRect(tx * TILE, ty * TILE, def.width * TILE, def.height * TILE);
+  ctx.stroke();
   ctx.setLineDash([]);
 
-  // Label above ghost
+  // Label above the top corner
   ctx.fillStyle = '#fff';
-  ctx.font = 'bold 9px Georgia';
+  ctx.font = `bold ${Math.round(11 * SPRITE_SCALE)}px Georgia`;
   ctx.textAlign = 'center';
   ctx.textBaseline = 'bottom';
-  ctx.fillText(def.label, tx * TILE + def.width * TILE / 2, ty * TILE - 2);
+  ctx.strokeStyle = 'rgba(0,0,0,0.7)';
+  ctx.lineWidth = 3;
+  ctx.strokeText(def.label, top.sx, top.sy - 4);
+  ctx.fillText(def.label, top.sx, top.sy - 4);
+  ctx.restore();
 }
 
 function isTileRangeWalkable(tx, ty, w, h) {
@@ -876,34 +1384,29 @@ function canAffordBuilding(type) {
 }
 
 // ── Fog of War overlay ───────────────────────────────────────────────────────
-function renderFog(camTX, camTY) {
+// Reuses the low-res alpha mask built for the minimap (1 px per tile). We project
+// it through the iso transform so each source pixel (i, j) → world tile (i, j) →
+// screen iso position. Bilinear smoothing keeps the vision edge soft.
+function renderFog() {
   const { ctx } = G;
-  const vx = visibleTilesX() + 1;
-  const vy = visibleTilesY() + 1;
+  if (!G.minimapFogCanvas) return;
+  const mh = mapHeight();
+  const originX = mh * TILE_W / 2;
 
-  for (let dy = 0; dy < vy; dy++) {
-    const ty = camTY + dy;
-    if (ty < 0 || ty >= mapHeight()) continue;
-    for (let dx = 0; dx < vx; dx++) {
-      const tx = camTX + dx;
-      if (tx < 0 || tx >= mapWidth()) continue;
+  const prev = ctx.imageSmoothingEnabled;
+  ctx.imageSmoothingEnabled = true;
+  ctx.imageSmoothingQuality = 'high';
 
-      const px = tx * TILE;
-      const py = ty * TILE;
+  ctx.save();
+  // Compose iso projection on top of current (camera) translate.
+  // Matrix maps (i, j) → ((i - j) * TILE_W/2 + originX, (i + j) * TILE_H/2)
+  ctx.transform(TILE_W / 2, TILE_H / 2,   // basis x: (1, 0) → (W/2, H/2)
+                -TILE_W / 2, TILE_H / 2,  // basis y: (0, 1) → (-W/2, H/2)
+                originX, 0);
+  ctx.drawImage(G.minimapFogCanvas, 0, 0);
+  ctx.restore();
 
-      if (isTileVisible(tx, ty)) {
-        // Fully visible — no overlay
-      } else if (isTileRevealed(tx, ty)) {
-        // Explored shroud — dark overlay
-        ctx.fillStyle = COLORS.fogShroud;
-        ctx.fillRect(px, py, TILE, TILE);
-      } else {
-        // Completely unexplored — solid black
-        ctx.fillStyle = COLORS.fogUnexplored;
-        ctx.fillRect(px, py, TILE, TILE);
-      }
-    }
-  }
+  ctx.imageSmoothingEnabled = prev;
 }
 
 // ─── Resource node drawing ────────────────────────────────────────────────────
@@ -1031,21 +1534,12 @@ function drawCavalry(ctx, cx, cy, playerColor) {
 }
 
 // ─── Utility ──────────────────────────────────────────────────────────────────
-function isInView(tx, ty, camTX, camTY) {
-  return tx >= camTX - 1
-    && tx <= camTX + visibleTilesX() + 1
-    && ty >= camTY - 1
-    && ty <= camTY + visibleTilesY() + 1;
-}
-
 function pixelToTile(e) {
   const rect = G.canvas.getBoundingClientRect();
-  const px = e.clientX - rect.left;
-  const py = e.clientY - rect.top;
-  return {
-    tx: Math.floor(px / TILE + G.camX),
-    ty: Math.floor(py / TILE + G.camY),
-  };
+  const sx = e.clientX - rect.left + G.camSX;
+  const sy = e.clientY - rect.top  + G.camSY;
+  const w = screenToWorld(sx, sy);
+  return { tx: Math.floor(w.tx), ty: Math.floor(w.ty) };
 }
 
 function villagerAtTile(tx, ty) {
@@ -1238,16 +1732,12 @@ function updatePanel() {
 function hideLobby() {
   document.getElementById('lobby').style.display = 'none';
 
-  // Set initial camera to player's base
-  const mw = mapWidth();
-  const mh = mapHeight();
-  if (G.myPlayerIndex <= 0) {
-    G.camX = 0;
-    G.camY = 0;
-  } else {
-    G.camX = Math.max(0, mw - visibleTilesX() - 2);
-    G.camY = Math.max(0, mh - visibleTilesY() - 2);
-  }
+  // Center camera on the player's town-center spawn (iso projected)
+  const myAnchor = G.myPlayerIndex === 0 ? { x: 2, y: 2 } : { x: 54, y: 54 };
+  const { sx, sy } = worldToScreen(myAnchor.x + 1.5, myAnchor.y + 1.5);
+  G.camSX = sx - G.canvas.width  / 2;
+  G.camSY = sy - G.canvas.height / 2;
+  clampCamera();
 
   if (!G.animFrameId) gameLoop();
 }
@@ -1318,33 +1808,77 @@ function buildMinimapFog() {
   G.minimapFogCanvas = mc;
 }
 
+// Minimap iso projection — fits the iso diamond into the minimap canvas.
+// Returns the per-unit scale `s` and offsets so that drawing with the affine
+// transform (s, s/2, -s, s/2, ox, oy) maps tile-grid pixels onto the diamond.
+function minimapTransform() {
+  const mw = mapWidth();
+  const mh = mapHeight();
+  const W  = G.minimapEl.width;
+  const H  = G.minimapEl.height;
+  const s  = Math.min(W / (mw + mh), H / ((mw + mh) / 2));
+  const usedW = s * (mw + mh);
+  const usedH = s * (mw + mh) / 2;
+  const ox = (W - usedW) / 2 + s * mh;
+  const oy = (H - usedH) / 2;
+  return { s, ox, oy };
+}
+
+function worldToMinimap(tx, ty) {
+  const { s, ox, oy } = minimapTransform();
+  return { mx: s * (tx - ty) + ox, my: (s / 2) * (tx + ty) + oy };
+}
+
 /** Render the minimap onto the dedicated #minimap-canvas element. */
 function renderMinimap() {
   const mc  = G.minimapEl;
   const mctx = G.minimapCtx;
   if (!mc || !mctx || !G.minimapCanvas) return;
 
-  const mw = mapWidth();
-  const mh = mapHeight();
-  const W  = mc.width;
-  const H  = mc.height;
-  const scaleX = W / mw;
-  const scaleY = H / mh;
+  const W = mc.width;
+  const H = mc.height;
+  const { s, ox, oy } = minimapTransform();
 
-  // 1. Static tile layer
-  mctx.drawImage(G.minimapCanvas, 0, 0, W, H);
+  // Background
+  mctx.fillStyle = '#1a1209';
+  mctx.fillRect(0, 0, W, H);
 
-  // 2. Resource nodes (dots — last-known-state)
+  // 1. Static tile layer — applies the iso transform to the top-down offscreen canvas
+  mctx.save();
+  mctx.imageSmoothingEnabled = false;
+  mctx.setTransform(s, s / 2, -s, s / 2, ox, oy);
+  mctx.drawImage(G.minimapCanvas, 0, 0);
+  mctx.restore();
+
+  // Helper: project a tile to minimap pixels (centered)
+  const toMini = (tx, ty) => ({
+    mx: s * (tx - ty) + ox,
+    my: (s / 2) * (tx + ty) + oy,
+  });
+
+  // Helper: draw a building footprint as an iso-diamond fill
+  const drawIsoFootprint = (tx, ty, w, h, color) => {
+    mctx.fillStyle = color;
+    const a = toMini(tx,     ty);
+    const b = toMini(tx + w, ty);
+    const c = toMini(tx + w, ty + h);
+    const d = toMini(tx,     ty + h);
+    mctx.beginPath();
+    mctx.moveTo(a.mx, a.my);
+    mctx.lineTo(b.mx, b.my);
+    mctx.lineTo(c.mx, c.my);
+    mctx.lineTo(d.mx, d.my);
+    mctx.closePath();
+    mctx.fill();
+  };
+
+  // 2. Resource nodes
   if (G.snapshot) {
     for (const node of G.snapshot.resourceNodes) {
       if (!isTileRevealed(node.position.x, node.position.y)) continue;
+      const { mx, my } = toMini(node.position.x, node.position.y);
       mctx.fillStyle = COLORS.resources[node.type] ?? '#fff';
-      mctx.fillRect(
-        node.position.x * scaleX,
-        node.position.y * scaleY,
-        Math.max(2, scaleX * 1.5),
-        Math.max(2, scaleY * 1.5),
-      );
+      mctx.fillRect(mx - Math.max(1, s), my - Math.max(1, s / 2), Math.max(2, s * 2), Math.max(2, s));
     }
   }
 
@@ -1353,13 +1887,7 @@ function renderMinimap() {
     for (const tc of G.snapshot.townCenters) {
       if (!isTileRevealed(tc.anchorPosition.x + 1, tc.anchorPosition.y + 1)) continue;
       const pidx = G.snapshot.players.findIndex(p => p.id === tc.ownerId);
-      mctx.fillStyle = COLORS.tc[pidx] ?? '#888';
-      mctx.fillRect(
-        tc.anchorPosition.x * scaleX,
-        tc.anchorPosition.y * scaleY,
-        3 * scaleX,
-        3 * scaleY,
-      );
+      drawIsoFootprint(tc.anchorPosition.x, tc.anchorPosition.y, 3, 3, COLORS.tc[pidx] ?? '#888');
     }
   }
 
@@ -1369,8 +1897,7 @@ function renderMinimap() {
       if (!isTileRevealed(b.x, b.y)) continue;
       const def = BUILDING_DEFS[b.type];
       if (!def) continue;
-      mctx.fillStyle = def.color;
-      mctx.fillRect(b.x * scaleX, b.y * scaleY, def.width * scaleX, def.height * scaleY);
+      drawIsoFootprint(b.x, b.y, def.width, def.height, def.color);
     }
   }
 
@@ -1380,49 +1907,58 @@ function renderMinimap() {
       const isOwn = v.ownerId === G.playerId;
       if (!isOwn && !isTileVisible(v.position.x, v.position.y)) continue;
       const pidx = G.snapshot.players.findIndex(p => p.id === v.ownerId);
+      const { mx, my } = toMini(v.position.x, v.position.y);
       mctx.fillStyle = COLORS.villager[pidx] ?? '#fff';
-      const dotSize = Math.max(3, scaleX * 2);
-      mctx.fillRect(
-        v.position.x * scaleX - dotSize / 2,
-        v.position.y * scaleY - dotSize / 2,
-        dotSize, dotSize,
-      );
+      const r = Math.max(1.5, s);
+      mctx.fillRect(mx - r, my - r / 2, r * 2, r);
     }
   }
 
-  // 5. Fog of war overlay
+  // 6. Fog of war overlay
   if (G.minimapFogCanvas) {
-    mctx.drawImage(G.minimapFogCanvas, 0, 0, W, H);
+    mctx.save();
+    mctx.imageSmoothingEnabled = false;
+    mctx.setTransform(s, s / 2, -s, s / 2, ox, oy);
+    mctx.drawImage(G.minimapFogCanvas, 0, 0);
+    mctx.restore();
   }
 
-  // 6. Camera viewport rectangle
-  const camW = visibleTilesX() * scaleX;
-  const camH = visibleTilesY() * scaleY;
-  const camPx = G.camX * scaleX;
-  const camPy = G.camY * scaleY;
-
+  // 7. Camera viewport — main and minimap share iso projection, so the screen-aligned
+  //    camera rectangle becomes a screen-aligned rectangle on the minimap.
+  const mainToMini = s / TILE_H; // = 2*s/TILE_W (iso 2:1)
+  const vx = G.camSX * mainToMini + (ox - mapHeight() * s);
+  const vy = G.camSY * mainToMini + oy;
+  const vw = G.canvas.width  * mainToMini;
+  const vh = G.canvas.height * mainToMini;
   mctx.strokeStyle = 'rgba(255,255,255,0.9)';
   mctx.lineWidth = 1.5;
-  mctx.strokeRect(camPx, camPy, camW, camH);
-
-  // Semi-transparent interior tint for visibility
   mctx.fillStyle = 'rgba(255,255,255,0.08)';
-  mctx.fillRect(camPx, camPy, camW, camH);
+  mctx.beginPath();
+  mctx.rect(vx, vy, vw, vh);
+  mctx.fill();
+  mctx.stroke();
 }
 
 /** Move camera so that the minimap click point is the center of the viewport. */
 function moveCameraToMinimapPoint(clientX, clientY) {
   const rect = G.minimapEl.getBoundingClientRect();
-  const relX = (clientX - rect.left)  / rect.width;
-  const relY = (clientY - rect.top)   / rect.height;
-  const mw = mapWidth();
-  const mh = mapHeight();
-  const targetTileX = relX * mw;
-  const targetTileY = relY * mh;
-  const maxCamX = Math.max(0, mw - visibleTilesX());
-  const maxCamY = Math.max(0, mh - visibleTilesY());
-  G.camX = Math.max(0, Math.min(maxCamX, targetTileX - visibleTilesX() / 2));
-  G.camY = Math.max(0, Math.min(maxCamY, targetTileY - visibleTilesY() / 2));
+  const cssX = clientX - rect.left;
+  const cssY = clientY - rect.top;
+  // Convert CSS click to canvas pixel coords (account for any CSS scaling)
+  const mx = cssX * (G.minimapEl.width  / rect.width);
+  const my = cssY * (G.minimapEl.height / rect.height);
+  // Invert iso transform: tx = (mx-ox)/(2s) + my/s + 0; we use the relations:
+  //   tx - ty = (mx - ox) / s
+  //   tx + ty = 2 * (my - oy) / s
+  const { s, ox, oy } = minimapTransform();
+  const a = (mx - ox) / s;
+  const b = 2 * (my - oy) / s;
+  const targetTileX = (a + b) / 2;
+  const targetTileY = (b - a) / 2;
+  const { sx, sy } = worldToScreen(targetTileX, targetTileY);
+  G.camSX = sx - G.canvas.width  / 2;
+  G.camSY = sy - G.canvas.height / 2;
+  clampCamera();
 }
 
 function setupMinimapInput() {
@@ -1458,7 +1994,9 @@ function setupMinimapInput() {
   resizeCanvas();
   window.addEventListener('resize', resizeCanvas);
 
+  buildTerrainSprites();
   loadSprites();
+  loadBuildingSprites();
   setupInput();
   setupMinimapInput();
 
