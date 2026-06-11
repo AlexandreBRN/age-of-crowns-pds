@@ -5,6 +5,7 @@ import { IMoveVillagerUseCase } from '../../../core/application/ports/in/IMoveVi
 import { IGatherResourceUseCase } from '../../../core/application/ports/in/IGatherResourceUseCase';
 import { ITrainVillagerUseCase } from '../../../core/application/ports/in/ITrainVillagerUseCase';
 import { IPlaceBuildingUseCase } from '../../../core/application/ports/in/IPlaceBuildingUseCase';
+import { IConstructBuildingUseCase } from '../../../core/application/ports/in/IConstructBuildingUseCase';
 import { IAdvanceEraUseCase } from '../../../core/application/ports/in/IAdvanceEraUseCase';
 import { ISessionRepository } from '../../../core/application/ports/out/ISessionRepository';
 import { GameLoopService } from '../../../core/application/services/GameLoopService';
@@ -18,6 +19,7 @@ export class WebSocketAdapter {
     private readonly gatherResourceUseCase: IGatherResourceUseCase,
     private readonly trainVillagerUseCase: ITrainVillagerUseCase,
     private readonly placeBuildingUseCase: IPlaceBuildingUseCase,
+    private readonly constructBuildingUseCase: IConstructBuildingUseCase,
     private readonly advanceEraUseCase: IAdvanceEraUseCase,
     private readonly sessionRepository: ISessionRepository,
     private readonly clientRegistry: ClientRegistry,
@@ -103,6 +105,14 @@ export class WebSocketAdapter {
           x: Number(message.x),
           y: Number(message.y),
           villagerId: message.villagerId ? String(message.villagerId) : undefined,
+        });
+        break;
+
+      case 'construct_building':
+        this.constructBuildingUseCase.execute({
+          playerId: currentPlayerId,
+          villagerId: String(message.villagerId),
+          buildingId: String(message.buildingId),
         });
         break;
 

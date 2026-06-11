@@ -160,6 +160,19 @@ export class GameSession {
     villager.commandGather(nodeId, node.x, node.y);
   }
 
+  commandVillagerConstruct(villagerId: string, buildingId: string): void {
+    const villager = this._villagers.get(villagerId);
+    if (!villager) throw new Error('Aldeão não encontrado');
+    if (villager.unitType !== 'villager') throw new Error('Apenas aldeões podem construir');
+    if (villager.isDying) throw new Error('Unidade está morrendo');
+    const building = this._playerBuildings.get(buildingId);
+    if (!building) throw new Error('Construção não encontrada');
+    if (building.ownerId !== villager.ownerId) throw new Error('Construção não pertence a você');
+    if (building.isComplete) throw new Error('Construção já concluída');
+    const dest = this._adjacentTile(building.x, building.y, building.width, building.height);
+    if (dest) villager.commandConstruct(building.id, dest.x, dest.y);
+  }
+
   commandVillagerAttack(villagerId: string, targetId: string, targetKind: AttackTargetKind): void {
     const attacker = this._villagers.get(villagerId);
     if (!attacker) throw new Error('Unidade não encontrada');

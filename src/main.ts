@@ -9,6 +9,7 @@ import { MoveVillagerUseCase } from './core/application/use-cases/MoveVillagerUs
 import { GatherResourceUseCase } from './core/application/use-cases/GatherResourceUseCase';
 import { TrainVillagerUseCase } from './core/application/use-cases/TrainVillagerUseCase';
 import { PlaceBuildingUseCase } from './core/application/use-cases/PlaceBuildingUseCase';
+import { ConstructBuildingUseCase } from './core/application/use-cases/ConstructBuildingUseCase';
 import { AdvanceEraUseCase } from './core/application/use-cases/AdvanceEraUseCase';
 import { GameLoopService } from './core/application/services/GameLoopService';
 
@@ -31,6 +32,7 @@ const moveVillagerUseCase = new MoveVillagerUseCase(sessionRepository);
 const gatherResourceUseCase = new GatherResourceUseCase(sessionRepository);
 const trainVillagerUseCase = new TrainVillagerUseCase(sessionRepository);
 const placeBuildingUseCase = new PlaceBuildingUseCase(sessionRepository);
+const constructBuildingUseCase = new ConstructBuildingUseCase(sessionRepository);
 const advanceEraUseCase = new AdvanceEraUseCase(sessionRepository);
 
 // --- Input adapters ---
@@ -41,6 +43,7 @@ const wsAdapter = new WebSocketAdapter(
   gatherResourceUseCase,
   trainVillagerUseCase,
   placeBuildingUseCase,
+  constructBuildingUseCase,
   advanceEraUseCase,
   sessionRepository,
   clientRegistry,

@@ -1904,6 +1904,15 @@ function enemyTargetAt(tx, ty) {
   return null;
 }
 
+// Own building still under construction at tile — used to resume interrupted builds.
+function ownUnderConstructionAt(tx, ty) {
+  for (const b of G.snapshot?.playerBuildings ?? []) {
+    if (b.ownerId !== G.playerId || b.status !== 'under_construction') continue;
+    if (tx >= b.x && tx < b.x + b.width && ty >= b.y && ty < b.y + b.height) return b;
+  }
+  return null;
+}
+
 // Friendly unit at tile — used for friendly-fire testing (Alt+right-click).
 function friendlyUnitAt(tx, ty) {
   if (!G.snapshot) return null;
@@ -2074,6 +2083,18 @@ function setupInput() {
         const v = G.snapshot?.villagers.find(x => x.id === vid);
         if (v && v.id !== attackTarget.id) {
           send({ type: 'attack_target', villagerId: vid, targetId: attackTarget.id, targetKind: attackTarget.kind });
+        }
+      }
+      return;
+    }
+
+    // Resume an own unfinished building — only villagers can build.
+    const buildSite = ownUnderConstructionAt(tx, ty);
+    if (buildSite) {
+      for (const vid of G.selectedIds) {
+        const v = G.snapshot?.villagers.find(x => x.id === vid);
+        if (v && v.unitType === 'villager') {
+          send({ type: 'construct_building', villagerId: vid, buildingId: buildSite.id });
         }
       }
       return;
