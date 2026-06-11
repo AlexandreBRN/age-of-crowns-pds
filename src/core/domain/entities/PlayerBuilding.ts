@@ -46,7 +46,7 @@ export const BUILDING_CONFIGS: Record<PlayerBuildingType, BuildingConfig> = {
     constructionTicks: 24,
     maxHp: 300,
     visionRadius: 8,
-    blocksMovement: false,
+    blocksMovement: true,
   },
   lumber_camp: {
     label: 'Serraria',
@@ -56,7 +56,7 @@ export const BUILDING_CONFIGS: Record<PlayerBuildingType, BuildingConfig> = {
     constructionTicks: 20,
     maxHp: 200,
     generates: { wood: 8 },
-    blocksMovement: false,
+    blocksMovement: true,
   },
   gold_mine: {
     label: 'Mina de Ouro',
@@ -66,7 +66,7 @@ export const BUILDING_CONFIGS: Record<PlayerBuildingType, BuildingConfig> = {
     constructionTicks: 28,
     maxHp: 200,
     generates: { gold: 5 },
-    blocksMovement: false,
+    blocksMovement: true,
   },
   farm: {
     label: 'Fazenda',
@@ -76,7 +76,7 @@ export const BUILDING_CONFIGS: Record<PlayerBuildingType, BuildingConfig> = {
     constructionTicks: 16,
     maxHp: 150,
     generates: { food: 8 },
-    blocksMovement: false,
+    blocksMovement: true,
   },
   stone_quarry: {
     label: 'Pedreira',
@@ -86,7 +86,7 @@ export const BUILDING_CONFIGS: Record<PlayerBuildingType, BuildingConfig> = {
     constructionTicks: 20,
     maxHp: 200,
     generates: { stone: 4 },
-    blocksMovement: false,
+    blocksMovement: true,
   },
 };
 
@@ -95,6 +95,7 @@ export class PlayerBuilding {
   private _constructionTicksRemaining: number;
   private readonly _constructionTotalTicks: number;
   private _hp: number;
+  private readonly _maxHp: number;
 
   constructor(
     private readonly _id: string,
@@ -102,12 +103,14 @@ export class PlayerBuilding {
     private readonly _type: PlayerBuildingType,
     private readonly _x: number,
     private readonly _y: number,
+    hpMultiplier = 1.0,
   ) {
     const cfg = BUILDING_CONFIGS[_type];
     this._constructionTotalTicks = cfg.constructionTicks;
     this._constructionTicksRemaining = cfg.constructionTicks;
     this._status = 'under_construction';
-    this._hp = cfg.maxHp;
+    this._maxHp = Math.floor(cfg.maxHp * hpMultiplier);
+    this._hp = this._maxHp;
   }
 
   get id(): string { return this._id; }
@@ -124,7 +127,7 @@ export class PlayerBuilding {
   get width(): number { return this.config.width; }
   get height(): number { return this.config.height; }
   get hp(): number { return this._hp; }
-  get maxHp(): number { return this.config.maxHp; }
+  get maxHp(): number { return this._maxHp; }
 
   takeDamage(amount: number): void {
     this._hp = Math.max(0, this._hp - amount);

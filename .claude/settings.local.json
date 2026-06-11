@@ -34,7 +34,9 @@
       "Bash(python3 /tmp/render_skip24.py)",
       "Bash(python3 /tmp/render_45.py)",
       "Bash(python3 /tmp/render_60.py)",
-      "Bash(python3 /tmp/render_52.py)"
+      "Bash(python3 /tmp/render_52.py)",
+      "Bash(python3 -c ' *)",
+      "Bash(sips -g pixelWidth -g pixelHeight /Users/lucassaraivacardoso/age-of-crowns-pds/src/assets/arqueiro/1-Walking.png)"
     ],
     "additionalDirectories": [
       "/private/tmp"

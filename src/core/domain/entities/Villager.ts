@@ -10,7 +10,7 @@ export interface UnitConfig {
   attackDamage: number;   // 0 = cannot attack
   attackRange: number;    // Chebyshev tiles; 0 = cannot attack
   attackCooldownTicks: number;
-  moveSpeedTiles: number; // steps per tick
+  moveSpeedTiles: number; // tiles per tick (may be fractional, e.g. 0.5 = half a tile per tick)
   trainCost: Record<string, number>;
   trainTicks: number;
 }
@@ -19,10 +19,10 @@ export const UNIT_CONFIGS: Record<UnitType, UnitConfig> = {
   villager: {
     label: 'Aldeão',
     maxHp: 50,
-    attackDamage: 0,
-    attackRange: 0,
-    attackCooldownTicks: 0,
-    moveSpeedTiles: 1,
+    attackDamage: 4,             // small — lets villagers defend / test attacks
+    attackRange: 1,
+    attackCooldownTicks: 4,      // 1 attack/sec
+    moveSpeedTiles: 0.20,        // 0.25 tile/tick = 1 tile/sec at 4 ticks/sec
     trainCost: { food: 50 },
     trainTicks: 20,
   },
@@ -32,7 +32,7 @@ export const UNIT_CONFIGS: Record<UnitType, UnitConfig> = {
     attackDamage: 8,
     attackRange: 5,
     attackCooldownTicks: 4,  // 1 attack/sec
-    moveSpeedTiles: 1,
+    moveSpeedTiles: 0.25,
     trainCost: { food: 50, wood: 30 },
     trainTicks: 24,
   },
@@ -42,13 +42,18 @@ export const UNIT_CONFIGS: Record<UnitType, UnitConfig> = {
     attackDamage: 15,
     attackRange: 1,
     attackCooldownTicks: 3,  // ~1.3 attacks/sec
-    moveSpeedTiles: 2,        // 2 tiles/tick
+    moveSpeedTiles: 0.40,     // ~1.6 tiles/sec — 2× villager, faster than archer
     trainCost: { food: 80, gold: 50 },
     trainTicks: 40,
   },
 };
 
-export type VillagerState = 'idle' | 'moving' | 'gathering' | 'constructing' | 'attacking';
+export type VillagerState = 'idle' | 'moving' | 'gathering' | 'constructing' | 'attacking' | 'dying';
+
+// Ticks a unit lingers in 'dying' state before being cleaned up — gives the
+// client time to play the death animation before the unit disappears.
+// 12 * 250ms = 3.0s (covers the longer "dead" anim: 46 frames @ 17fps ≈ 2.7s).
+export const DYING_LINGER_TICKS = 12;
 
 export class Villager {
   private _x: number;
@@ -66,6 +71,7 @@ export class Villager {
   private _attackTargetId: string | null = null;
   private _attackTargetKind: AttackTargetKind | null = null;
   private _attackTickCounter = 0;
+  private _dyingTickCounter = 0; // ticks spent in 'dying' state after hp <= 0
 
   constructor(
     private readonly _id: VillagerId,
@@ -89,6 +95,9 @@ export class Villager {
   get unitType(): UnitType { return this._unitType; }
   get config(): UnitConfig { return UNIT_CONFIGS[this._unitType]; }
   get isDead(): boolean { return this._hp <= 0; }
+  get isDying(): boolean { return this._state === 'dying'; }
+  get shouldBeRemoved(): boolean { return this._state === 'dying' && this._dyingTickCounter >= DYING_LINGER_TICKS; }
+  get dyingTickCounter(): number { return this._dyingTickCounter; }
   get moveTargetX(): number | null { return this._moveTargetX; }
   get moveTargetY(): number | null { return this._moveTargetY; }
   get gatherTargetId(): string | null { return this._gatherTargetId; }
@@ -172,6 +181,23 @@ export class Villager {
     this._hp = Math.max(0, this._hp - amount);
   }
 
+  /** Transition into the 'dying' state — drops all targets, freezes movement. */
+  enterDying(): void {
+    this._state = 'dying';
+    this._dyingTickCounter = 0;
+    this._moveTargetX = null;
+    this._moveTargetY = null;
+    this._path = [];
+    this._gatherTargetId = null;
+    this._gatherTargetX = null;
+    this._gatherTargetY = null;
+    this._constructTargetId = null;
+    this._attackTargetId = null;
+    this._attackTargetKind = null;
+  }
+
+  tickDying(): void { this._dyingTickCounter++; }
+
   incrementGatherCounter(): void { this._gatherTickCounter++; }
   resetGatherCounter(): void { this._gatherTickCounter = 0; }
   incrementAttackCounter(): void { this._attackTickCounter++; }
@@ -184,14 +210,20 @@ export class Villager {
   }
 
   /**
-   * Moves one tile toward current move target along an A*-computed path.
+   * Advances along an A*-computed path by `config.moveSpeedTiles` tiles
+   * (may be fractional — supports speeds like 0.5 tile/tick for smooth movement).
    * Supports 8-directional movement with corner-cutting prevention.
    * Returns true if position changed.
    */
   stepTowardTarget(isBlocked?: (x: number, y: number) => boolean): boolean {
     if (this._moveTargetX === null || this._moveTargetY === null) return false;
 
-    if (this._x === this._moveTargetX && this._y === this._moveTargetY) {
+    const EPS = 1e-4;
+    const atTarget = Math.abs(this._x - this._moveTargetX) < EPS
+                  && Math.abs(this._y - this._moveTargetY) < EPS;
+    if (atTarget) {
+      this._x = this._moveTargetX;
+      this._y = this._moveTargetY;
       this._path = [];
       if (this._constructTargetId !== null) {
         this._state = 'constructing';
@@ -212,26 +244,72 @@ export class Villager {
     const blocked = isBlocked ?? (() => false);
 
     if (this._path.length === 0) {
-      this._path = findPath(this._x, this._y, this._moveTargetX, this._moveTargetY, blocked);
+      const startX = Math.round(this._x);
+      const startY = Math.round(this._y);
+      this._path = findPath(startX, startY, this._moveTargetX, this._moveTargetY, blocked);
       if (this._path.length === 0) return false;
+      // If recompute happened mid-tile, prepend the tile center as a snap waypoint so
+      // the first sub-step is purely orthogonal (one of the 8 directions).
+      if (Math.abs(this._x - startX) > EPS || Math.abs(this._y - startY) > EPS) {
+        this._path.unshift({ x: startX, y: startY });
+      }
     }
 
-    const next = this._path[0];
-    const sdx = next.x - this._x;
-    const sdy = next.y - this._y;
-    if (Math.abs(sdx) > 1 || Math.abs(sdy) > 1 || blocked(next.x, next.y)) {
-      this._path = [];
-      return false;
+    // Advance along the path. Carry the unused fraction of `speed` over to the
+    // next path waypoint ONLY when both segments share the same 8-dir direction
+    // — that keeps movement smooth along straight runs (no stutter at the end
+    // of diagonal tiles) while still preventing two different direction vectors
+    // from being mixed inside the same tick (which would break the
+    // axis-aligned animation guarantee at corners).
+    const speed = this.config.moveSpeedTiles;
+    let remaining = speed;
+    let moved = false;
+    let lastSegDx: number | null = null;
+    let lastSegDy: number | null = null;
+    while (remaining > EPS && this._path.length > 0) {
+      const next = this._path[0];
+      const dx = next.x - this._x;
+      const dy = next.y - this._y;
+      const dist = Math.sqrt(dx * dx + dy * dy);
+      if (dist <= EPS) { this._path.shift(); continue; }
+      const segDx = Math.abs(dx) < EPS ? 0 : (dx > 0 ? 1 : -1);
+      const segDy = Math.abs(dy) < EPS ? 0 : (dy > 0 ? 1 : -1);
+      if (lastSegDx !== null && (segDx !== lastSegDx || segDy !== lastSegDy)) {
+        // Direction changes between segments — stop here, drop carry-over.
+        break;
+      }
+      lastSegDx = segDx;
+      lastSegDy = segDy;
+      if (blocked(next.x, next.y)) {
+        this._path = [];
+        return moved;
+      }
+      // Corner-cutting check: only valid when we're exactly at a tile center
+      // (start of a segment). Mid-segment positions round to the wrong tile and
+      // would check unrelated neighbors — A* already validated the corner at
+      // segment start, so re-checking from a fractional position is bogus.
+      const atTileCenter = Math.abs(this._x - Math.round(this._x)) < EPS
+                        && Math.abs(this._y - Math.round(this._y)) < EPS;
+      if (segDx !== 0 && segDy !== 0 && atTileCenter) {
+        const cx = Math.round(this._x), cy = Math.round(this._y);
+        if (blocked(cx + segDx, cy) || blocked(cx, cy + segDy)) {
+          this._path = [];
+          return moved;
+        }
+      }
+      if (dist <= remaining) {
+        this._x = next.x;
+        this._y = next.y;
+        this._path.shift();
+        remaining -= dist;
+      } else {
+        this._x += (dx / dist) * remaining;
+        this._y += (dy / dist) * remaining;
+        remaining = 0;
+      }
+      moved = true;
     }
-    if (sdx !== 0 && sdy !== 0 && (blocked(this._x + sdx, this._y) || blocked(this._x, this._y + sdy))) {
-      this._path = [];
-      return false;
-    }
-
-    this._x = next.x;
-    this._y = next.y;
-    this._path.shift();
-    return true;
+    return moved;
   }
 
   setIdle(): void {
@@ -257,7 +335,8 @@ export class Villager {
       id: this._id.value,
       ownerId: this._ownerId,
       unitType: this._unitType,
-      position: { x: this._x, y: this._y },
+      position: { x: Math.round(this._x), y: Math.round(this._y) },
+      subPosition: { x: this._x, y: this._y },
       hp: this._hp,
       maxHp: UNIT_CONFIGS[this._unitType].maxHp,
       state: this._state,
@@ -266,6 +345,7 @@ export class Villager {
       constructTarget: this._constructTargetId,
       attackTargetId: this._attackTargetId,
       attackTargetKind: this._attackTargetKind,
+      dyingTicks: this._dyingTickCounter,
     };
   }
 }

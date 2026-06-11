@@ -9,6 +9,7 @@ import { MoveVillagerUseCase } from './core/application/use-cases/MoveVillagerUs
 import { GatherResourceUseCase } from './core/application/use-cases/GatherResourceUseCase';
 import { TrainVillagerUseCase } from './core/application/use-cases/TrainVillagerUseCase';
 import { PlaceBuildingUseCase } from './core/application/use-cases/PlaceBuildingUseCase';
+import { AdvanceEraUseCase } from './core/application/use-cases/AdvanceEraUseCase';
 import { GameLoopService } from './core/application/services/GameLoopService';
 
 const PORT = Number(process.env.PORT ?? 4000);
@@ -30,6 +31,7 @@ const moveVillagerUseCase = new MoveVillagerUseCase(sessionRepository);
 const gatherResourceUseCase = new GatherResourceUseCase(sessionRepository);
 const trainVillagerUseCase = new TrainVillagerUseCase(sessionRepository);
 const placeBuildingUseCase = new PlaceBuildingUseCase(sessionRepository);
+const advanceEraUseCase = new AdvanceEraUseCase(sessionRepository);
 
 // --- Input adapters ---
 const wsAdapter = new WebSocketAdapter(
@@ -39,6 +41,7 @@ const wsAdapter = new WebSocketAdapter(
   gatherResourceUseCase,
   trainVillagerUseCase,
   placeBuildingUseCase,
+  advanceEraUseCase,
   sessionRepository,
   clientRegistry,
   eventPublisher,

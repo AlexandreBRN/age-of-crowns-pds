@@ -2,15 +2,17 @@ export interface VillagerDTO {
   id: string;
   ownerId: string;
   unitType: 'villager' | 'archer' | 'cavalry';
-  position: { x: number; y: number };
+  position: { x: number; y: number };       // rounded to integer tile (for hit-tests, fog, etc.)
+  subPosition: { x: number; y: number };    // exact float position (for smooth rendering)
   hp: number;
   maxHp: number;
-  state: 'idle' | 'moving' | 'gathering' | 'constructing' | 'attacking';
+  state: 'idle' | 'moving' | 'gathering' | 'constructing' | 'attacking' | 'dying';
   moveTarget: { x: number; y: number } | null;
   gatherTarget: string | null;
   constructTarget: string | null;
   attackTargetId: string | null;
   attackTargetKind: 'unit' | 'building' | 'town_center' | null;
+  dyingTicks: number;
 }
 
 export interface TownCenterDTO {
@@ -35,6 +37,7 @@ export interface PlayerSnapshotDTO {
   id: string;
   name: string;
   resources: { gold: number; wood: number; stone: number; food: number };
+  era: number;
 }
 
 export interface PlayerBuildingDTO {

@@ -12,7 +12,20 @@ export interface PlayerData {
   id: string;
   name: string;
   resources: Resources;
+  era: number;
 }
+
+// Cost to advance to era index N (index 0 unused). Era 1 is the initial state.
+export const ERA_UP_COSTS: ReadonlyArray<{ gold: number; wood: number; stone: number; food: number } | null> = [
+  null,                                                  // era 1 (initial)
+  { gold: 500,  wood: 500,  stone: 300,  food: 300  },   // 1 → 2
+  { gold: 1500, wood: 1500, stone: 1000, food: 1000 },   // 2 → 3
+];
+
+// Passive bonuses by era (index = current era). Era 1 is the baseline.
+const ERA_GEN_MULT = [1.0, 1.0, 1.5, 2.0];
+const ERA_HP_MULT  = [1.0, 1.0, 1.25, 1.5];
+export const MAX_ERA = 3;
 
 export interface ResourceNodeSpec {
   id: string;
@@ -94,6 +107,23 @@ export class GameSession {
       id: playerId,
       name: playerName,
       resources: Resources.initial(),
+      era: 1,
+    });
+  }
+
+  commandAdvanceEra(playerId: string): void {
+    const player = this._players.get(playerId);
+    if (!player) throw new Error('Jogador não encontrado');
+    if (player.era >= MAX_ERA) throw new Error('Era máxima atingida');
+    const cost = ERA_UP_COSTS[player.era + 1];
+    if (!cost) throw new Error('Era máxima atingida');
+    if (!player.resources.canAfford(cost)) {
+      throw new Error('Recursos insuficientes para avançar de era');
+    }
+    this._players.set(playerId, {
+      ...player,
+      era: player.era + 1,
+      resources: player.resources.subtract(cost),
     });
   }
 
@@ -134,8 +164,11 @@ export class GameSession {
     const attacker = this._villagers.get(villagerId);
     if (!attacker) throw new Error('Unidade não encontrada');
     if (attacker.config.attackDamage === 0) throw new Error('Esta unidade não pode atacar');
+    if (attacker.isDying) throw new Error('Unidade está morrendo');
     const targetOwner = this._getTargetOwner(targetId, targetKind);
-    if (!targetOwner || targetOwner === attacker.ownerId) throw new Error('Alvo inválido');
+    if (!targetOwner) throw new Error('Alvo inválido');
+    // Friendly-fire allowed (for testing death animations / sparring).
+    if (targetId === attacker.id.value) throw new Error('Não pode atacar a si mesmo');
     attacker.commandAttack(targetId, targetKind);
   }
 
@@ -174,7 +207,8 @@ export class GameSession {
       }
     }
 
-    const building = new PlayerBuilding(uuidv4(), playerId, type, x, y);
+    const hpMult = ERA_HP_MULT[player.era] ?? 1.0;
+    const building = new PlayerBuilding(uuidv4(), playerId, type, x, y, hpMult);
     this._playerBuildings.set(building.id, building);
     this._players.set(playerId, {
       ...player,
@@ -194,13 +228,10 @@ export class GameSession {
     const isTileBlocked = (x: number, y: number) =>
       !this._isTileWalkable(x, y) || this._isTileBlockedByCompleteBuilding(x, y);
 
-    // ── Movement (multi-speed for cavalry) ───────────────────────────────────
+    // ── Movement (fractional tiles per tick — handled inside stepTowardTarget) ─
     for (const villager of this._villagers.values()) {
       if (villager.state !== 'moving') continue;
-      const steps = villager.config.moveSpeedTiles;
-      for (let i = 0; i < steps; i++) {
-        if (!villager.stepTowardTarget(isTileBlocked)) break;
-      }
+      villager.stepTowardTarget(isTileBlocked);
     }
 
     // ── Construction ─────────────────────────────────────────────────────────
@@ -285,12 +316,14 @@ export class GameSession {
         const gen = building.config.generates;
         if (!gen) continue;
         const player = this._players.get(building.ownerId);
-        if (player) {
-          this._players.set(building.ownerId, {
-            ...player,
-            resources: player.resources.add(gen),
-          });
-        }
+        if (!player) continue;
+        const mult = ERA_GEN_MULT[player.era] ?? 1.0;
+        const scaledGen: Record<string, number> = {};
+        for (const [k, v] of Object.entries(gen)) scaledGen[k] = Math.floor((v as number) * mult);
+        this._players.set(building.ownerId, {
+          ...player,
+          resources: player.resources.add(scaledGen),
+        });
       }
     }
 
@@ -303,9 +336,14 @@ export class GameSession {
       }
     }
 
-    // ── Cleanup dead/destroyed entities ──────────────────────────────────────
+    // ── Death transition: hp<=0 → 'dying' state; linger DYING_LINGER_TICKS
+    // ticks so the client can play the death animation, then remove. ──────────
+    for (const v of this._villagers.values()) {
+      if (v.isDead && !v.isDying) v.enterDying();
+      else if (v.isDying) v.tickDying();
+    }
     for (const [id, v] of this._villagers) {
-      if (v.isDead) this._villagers.delete(id);
+      if (v.shouldBeRemoved) this._villagers.delete(id);
     }
     for (const [id, b] of this._playerBuildings) {
       if (b.isDestroyed) this._playerBuildings.delete(id);
@@ -323,6 +361,7 @@ export class GameSession {
         id: p.id,
         name: p.name,
         resources: p.resources.toJSON(),
+        era: p.era,
       })),
       villagers: Array.from(this._villagers.values()).map(v => v.toJSON()),
       townCenters: Array.from(this._townCenters.values()).map(tc => tc.toJSON()),
@@ -361,6 +400,11 @@ export class GameSession {
     for (const b of this._playerBuildings.values()) {
       if (!b.isComplete || !b.config.blocksMovement) continue;
       for (const t of b.occupiedTiles) {
+        if (t.x === x && t.y === y) return true;
+      }
+    }
+    for (const tc of this._townCenters.values()) {
+      for (const t of tc.occupiedTiles) {
         if (t.x === x && t.y === y) return true;
       }
     }
@@ -473,7 +517,7 @@ export class GameSession {
       { x: tcAnchorX, y: tcAnchorY + 3 },
       { x: tcAnchorX - 1, y: tcAnchorY },
     ];
-    const occupied = new Set(Array.from(this._villagers.values()).map(v => `${v.x},${v.y}`));
+    const occupied = new Set(Array.from(this._villagers.values()).map(v => `${Math.round(v.x)},${Math.round(v.y)}`));
     for (const pos of candidates) {
       if (!occupied.has(`${pos.x},${pos.y}`) && this._isTileWalkable(pos.x, pos.y)) {
         const v = new Villager(VillagerId.generate(), playerId, pos.x, pos.y, unitType);

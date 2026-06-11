@@ -39,6 +39,23 @@ const BUILDING_DEFS = {
   stone_quarry: { label:'Pedreira',       width:2, height:2, cost:{wood:30,stone:10},   color:'#808080' },
 };
 
+// Per-building sprite-sheet metadata (5 horizontal frames, 0=blueprint, 1=construction,
+// 2=era1, 3=era2, 4=era3). Update `fw`/`fh` when the source PNG is re-exported.
+// `footRatio` is how far down (fraction of drawH) the building's ground line sits
+// — matches the wall sprite pattern.
+const BUILDING_SPRITE_META = {
+  gold_mine:    { frames: 5, fw: 377.6, fh: 560, drawScale: 1.2, footRatio: 0.72 },
+  stone_quarry: { frames: 5, fw: 377.6, fh: 560, drawScale: 1.2, footRatio: 0.72 },
+};
+
+// Mirrors server ERA_UP_COSTS — UI-only (server validates).
+const ERA_UP_COSTS = [
+  null,
+  { gold: 500,  wood: 500,  stone: 300,  food: 300  }, // 1 → 2
+  { gold: 1500, wood: 1500, stone: 1000, food: 1000 }, // 2 → 3
+];
+const MAX_ERA = 3;
+
 // Unit configs (mirrors server UNIT_CONFIGS)
 const UNIT_DEFS = {
   villager: { label:'Aldeão',    maxHp:50,  color:null,      trainCost:{food:50},         trainTicks:20 },
@@ -68,13 +85,59 @@ const COLORS = {
   fogShroud:     'rgba(0,0,0,0.55)',
 };
 
-// Sprite paths — exact filenames as found in assets folder
-const SPRITE_PATHS = {
-  idle:          '/assets/aldeao/iddle.gif',
-  running_right: '/assets/aldeao/runnig_right.gif',  // typo in source file
-  running_down:  '/assets/aldeao/running_down.gif',
-  running_left:  '/assets/aldeao/running_left.gif',
-  running_up:    '/assets/aldeao/running_up.gif',
+// Animation definitions — one entry per direction. Each entry is a horizontal
+// sprite sheet of `frames` cells of size `fw`×`fh`. Direction keys map to the
+// 8 movement directions on the iso screen (see `directionForMove`).
+const ANIM_FPS = 17; // frames/sec — one full walk cycle per second by default
+const SERVER_TICK_MS = 250; // matches GameLoopService.TICK_MS — used for position interpolation
+
+// Build 8 direction sheets `{src: <base>/walking/1.png ...}` for a single (unit, anim) pair.
+function makeDirSet(base, frames, opts = {}) {
+  const fps = opts.fps ?? ANIM_FPS;
+  const fw  = opts.fw  ?? 256;
+  const fh  = opts.fh  ?? 256;
+  const set = {};
+  for (let i = 1; i <= 8; i++) set[String(i)] = { src: `${base}/${i}.png`, frames, fw, fh, fps };
+  return set;
+}
+
+// Per-unit-type animation library: ANIM_DEFS[unitType][animKey][dirKey] = sheetDef.
+// `walking` is required (used as fallback). Other anims play when state matches.
+//   idle    → state === 'idle'         (loops)
+//   walking → state === 'moving'       (loops)
+//   running → state === 'moving' & cavalry (loops, alias for walking otherwise)
+//   shot    → state === 'attacking'    (loops while attacking)
+//   dying   → 0–0.6s after death       (plays once)
+//   dead    → 0.6s+ after death        (held on last frame)
+// To add a new unit: drop sprites in /src/assets/<folder>/<anim>/{1..8}.png and add an entry here.
+const ANIM_DEFS = {
+  villager: {
+    walking: makeDirSet('/assets/aldeao-novo/walking',     17),
+    running: makeDirSet('/assets/aldeao-novo/running',     11),
+    idle:    makeDirSet('/assets/aldeao-novo/idle',        50),
+    attack:  makeDirSet('/assets/aldeao-novo/attack',      43),
+    hammer:  makeDirSet('/assets/aldeao-novo/hammer',      29),
+    gather:  makeDirSet('/assets/aldeao-novo/gather',     107),
+    dying:   makeDirSet('/assets/aldeao-novo/dying',       34),
+    dead:    makeDirSet('/assets/aldeao-novo/dead',        46),
+  },
+  archer: {
+    walking: makeDirSet('/assets/arqueiro/walking', 17),
+    idle:    makeDirSet('/assets/arqueiro/idle',    31),
+    running: makeDirSet('/assets/arqueiro/running', 11),
+    shot:    makeDirSet('/assets/arqueiro/shot',    29),
+    dying:   makeDirSet('/assets/arqueiro/dying',   34),
+    dead:    makeDirSet('/assets/arqueiro/dead',    46),
+  },
+  cavalry: {
+    walking: makeDirSet('/assets/guerreiro/walking', 17),
+    running: makeDirSet('/assets/guerreiro/running', 11),
+    idle:    makeDirSet('/assets/guerreiro/idle',    29),
+    attack:  makeDirSet('/assets/guerreiro/attack',  43),
+    combo:   makeDirSet('/assets/guerreiro/combo',   66),
+    dying:   makeDirSet('/assets/guerreiro/dying',   34),
+    dead:    makeDirSet('/assets/guerreiro/dead',    46),
+  },
 };
 
 // ─── State ────────────────────────────────────────────────────────────────────
@@ -101,6 +164,10 @@ const G = {
   // Camera in screen pixels (top-left of viewport in iso world space)
   camSX: 0,
   camSY: 0,
+  zoom: 1,           // multiplier applied to the main canvas; 1 = default
+  zoomMin: 0.5,
+  zoomMax: 2.0,
+  zoomStep: 0.25,
   keysHeld: {},
 
   canvas: null,
@@ -108,8 +175,17 @@ const G = {
   wrapper: null,
   animFrameId: null,
 
-  sprites: {},           // loaded Image objects
+  sprites: {},           // loaded animation defs (img + metadata)
   spritesReady: false,
+  villagerDir: new Map(),     // villagerId → last facing direction key ('1'..'8')
+  villagerPrevPos: new Map(), // villagerId → {x, y} from previous snapshot
+  lastSnapshotTime: 0,        // performance.now() at last state_update arrival
+
+  // Pre-rendered terrain sprite variants (built once at startup)
+  terrainSprites: { grass: [], dirt: [] },
+
+  // Building sprite assets (canvas elements after color-key + load)
+  buildingSprites: {},
 
   // Pre-rendered terrain sprite variants (built once at startup)
   terrainSprites: { grass: [], dirt: [] },
@@ -120,6 +196,12 @@ const G = {
   // Building placement
   placingBuildingType: null,  // string key from BUILDING_DEFS, or null
   ghostTile: null,            // { tx, ty } — current cursor tile
+
+  // Drag-select state (canvas-pixel coords)
+  dragStart: null,            // { x, y } where mousedown happened
+  dragCurrent: null,          // { x, y } current cursor
+  isDragging: false,          // movement exceeded threshold since mousedown
+  swallowNextClick: false,    // suppress the click event after a drag
 };
 
 // Apply a near-white color key to a loaded image and return an offscreen canvas
@@ -176,10 +258,19 @@ function loadBuildingSprites() {
     roofPeak: '/sprites/constructions/roofPeak.png',
     chimneyBase_N: '/sprites/constructions/chimneyBase_N.png',
     chimneyTop_N:  '/sprites/constructions/chimneyTop_N.png',
+
+    // 5-frame building sprite sheets (keyed by building type)
+    gold_mine:    '/assets/construcoes/mina.png',
+    stone_quarry: '/assets/construcoes/pedreira.png',
   };
+  // These sprites are already RGBA with transparent backgrounds — skip color-key
+  // (color-keying would erase bright/white parts of the art).
+  const skipColorKey = new Set(Object.keys(BUILDING_SPRITE_META));
   for (const [name, path] of Object.entries(paths)) {
     const img = new Image();
-    img.onload = () => { G.buildingSprites[name] = colorKeyWhite(img); };
+    img.onload = () => {
+      G.buildingSprites[name] = skipColorKey.has(name) ? img : colorKeyWhite(img);
+    };
     img.onerror = () => { console.warn('Failed to load sprite:', path); };
     img.src = path;
   }
@@ -223,6 +314,18 @@ function clipDiamond(cx) {
   cx.lineTo(0,          TILE_H / 2);
   cx.closePath();
   cx.clip();
+}
+
+// Snap each pixel's alpha to either fully transparent or fully opaque.
+// Without this, the diamond clip leaves antialiased edges; adjacent tiles end up
+// with semi-transparent boundary pixels that show the canvas background through
+// as thin dark seams between tiles.
+function snapAlpha(canvas) {
+  const cx = canvas.getContext('2d');
+  const data = cx.getImageData(0, 0, canvas.width, canvas.height);
+  const d = data.data;
+  for (let i = 3; i < d.length; i += 4) d[i] = d[i] >= 128 ? 255 : 0;
+  cx.putImageData(data, 0, 0);
 }
 
 function makeGrassSprite(seed) {
@@ -279,6 +382,7 @@ function makeGrassSprite(seed) {
     cx.fillRect(fx, fy, 1, 1);
   }
 
+  snapAlpha(c);
   return c;
 }
 
@@ -319,6 +423,7 @@ function makeDirtSprite(seed) {
     cx.fillRect(px, py, sz, sz);
   }
 
+  snapAlpha(c);
   return c;
 }
 
@@ -337,35 +442,124 @@ function tileHash(tx, ty) {
 }
 
 // ─── Sprite loading ───────────────────────────────────────────────────────────
+// Loads every unit × anim × direction sheet into G.sprites[unitType][animKey][dirKey].
 function loadSprites() {
-  // Container kept visible off-screen so GIF animations keep running
-  const container = document.createElement('div');
-  container.style.cssText = 'position:fixed;left:-9999px;top:0;width:1px;height:1px;overflow:hidden;';
-  document.body.appendChild(container);
-
+  const flat = [];
+  for (const [unitType, anims] of Object.entries(ANIM_DEFS)) {
+    G.sprites[unitType] = {};
+    for (const [animKey, dirs] of Object.entries(anims)) {
+      G.sprites[unitType][animKey] = {};
+      for (const [dirKey, def] of Object.entries(dirs)) {
+        flat.push({ unitType, animKey, dirKey, def });
+      }
+    }
+  }
+  if (flat.length === 0) { G.spritesReady = true; return; }
   let loaded = 0;
-  const total = Object.keys(SPRITE_PATHS).length;
+  const total = flat.length;
 
-  for (const [name, src] of Object.entries(SPRITE_PATHS)) {
+  for (const { unitType, animKey, dirKey, def } of flat) {
     const img = new Image();
-    img.onload = () => {
-      loaded++;
-      if (loaded === total) G.spritesReady = true;
-    };
-    img.onerror = () => { loaded++; }; // fallback to shapes if missing
-    img.src = src;
-    container.appendChild(img);  // must be in DOM for GIF to animate
-    G.sprites[name] = img;
+    img.onload  = () => { loaded++; if (loaded === total) G.spritesReady = true; };
+    img.onerror = () => { loaded++; if (loaded === total) G.spritesReady = true; };
+    img.src = def.src;
+    G.sprites[unitType][animKey][dirKey] = { ...def, img };
   }
 }
 
-function spriteForVillager(v) {
-  if (v.state !== 'moving' || !v.moveTarget) return G.sprites.idle;
-  const dx = v.moveTarget.x - v.position.x;
-  const dy = v.moveTarget.y - v.position.y;
-  // Horizontal movement takes priority (matches server movement algorithm)
-  if (dx !== 0) return dx > 0 ? G.sprites.running_right : G.sprites.running_left;
-  return dy > 0 ? G.sprites.running_down : G.sprites.running_up;
+// Map a world-space movement (dx, dy) to a direction key '1'..'8' matching
+// how the character appears on screen in iso projection. Returns null if (0,0).
+//   1 SE / 2 SW / 3 NE / 4 NW / 5 S / 6 E / 7 W / 8 N
+function directionForMove(dx, dy) {
+  const sx = Math.sign(dx);
+  const sy = Math.sign(dy);
+  if (sx ===  1 && sy ===  0) return '1';
+  if (sx === -1 && sy ===  0) return '4';
+  if (sx ===  0 && sy ===  1) return '2';
+  if (sx ===  0 && sy === -1) return '3';
+  if (sx ===  1 && sy ===  1) return '5';
+  if (sx ===  1 && sy === -1) return '6';
+  if (sx === -1 && sy ===  1) return '7';
+  if (sx === -1 && sy === -1) return '8';
+  return null;
+}
+
+// Simple deterministic hash of a string — used to pick a death variant per
+// unit so all clients show the same animation for the same unit id.
+function hashStr(s) {
+  let h = 0;
+  for (let i = 0; i < s.length; i++) h = ((h << 5) - h + s.charCodeAt(i)) | 0;
+  return Math.abs(h);
+}
+
+// Picks the animation key for a unit's current state, with sensible fallbacks
+// when the unit doesn't have that animation available.
+function animKeyForState(v, unitSet) {
+  const has = (k) => unitSet[k] !== undefined;
+  if (v.state === 'dying') {
+    // Both 'dying' and 'dead' are death animations (fall backwards / fall
+    // forwards). Pick one deterministically per unit so it's consistent across
+    // clients and across re-renders for the same unit.
+    const variants = ['dying', 'dead'].filter(has);
+    if (variants.length > 0) return variants[hashStr(v.id) % variants.length];
+  }
+  if (v.state === 'attacking') {
+    if (has('shot'))    return 'shot';    // archer
+    if (has('attack'))  return 'attack';  // villager / cavalry
+  }
+  if (v.state === 'constructing' && has('hammer')) return 'hammer';
+  if (v.state === 'gathering'    && has('gather')) return 'gather';
+  if (v.state === 'moving') {
+    if (v.unitType === 'cavalry' && has('running')) return 'running';
+    return 'walking';
+  }
+  if (v.state === 'idle' && has('idle')) return 'idle';
+  return has('walking') ? 'walking' : Object.keys(unitSet)[0];
+}
+
+// Returns a draw spec { img, sx, sy, sw, sh } for the current frame of the unit,
+// or null when no sprite is loaded for its type.
+function spriteForUnit(v) {
+  const unitSet = G.sprites[v.unitType];
+  if (!unitSet) return null;
+
+  // Direction tracking (shared across animations) — updated only while moving.
+  const moving = v.state === 'moving' && v.moveTarget;
+  let dirKey = null;
+  if (moving) {
+    const cur = v.subPosition ?? v.position;
+    const prev = G.villagerPrevPos.get(v.id);
+    const EPS = 1e-3;
+    if (prev && (Math.abs(prev.x - cur.x) > EPS || Math.abs(prev.y - cur.y) > EPS)) {
+      dirKey = directionForMove(cur.x - prev.x, cur.y - prev.y);
+    } else {
+      dirKey = directionForMove(v.moveTarget.x - cur.x, v.moveTarget.y - cur.y);
+    }
+    if (dirKey) G.villagerDir.set(v.id, dirKey);
+  }
+  if (!dirKey) dirKey = G.villagerDir.get(v.id) || '5';
+
+  const animKey = animKeyForState(v, unitSet);
+  const animDirs = unitSet[animKey];
+  const anim = animDirs && animDirs[dirKey];
+  if (!anim || !anim.img.complete || anim.img.naturalWidth === 0) {
+    // Fallback to walking if the chosen animation isn't loaded yet.
+    const fb = unitSet.walking?.[dirKey];
+    if (!fb || !fb.img.complete || fb.img.naturalWidth === 0) return null;
+    const idxF = Math.floor(performance.now() / 1000 * fb.fps) % fb.frames;
+    return { img: fb.img, sx: idxF * fb.fw, sy: 0, sw: fb.fw, sh: fb.fh };
+  }
+
+  // Dying plays once and holds on the last frame, driven by server tick count
+  // (so all clients stay in sync regardless of when they look at the unit).
+  let idx;
+  if (v.state === 'dying') {
+    const elapsedSec = (v.dyingTicks ?? 0) * (SERVER_TICK_MS / 1000);
+    idx = Math.min(anim.frames - 1, Math.floor(elapsedSec * anim.fps));
+  } else {
+    idx = Math.floor(performance.now() / 1000 * anim.fps) % anim.frames;
+  }
+  return { img: anim.img, sx: idx * anim.fw, sy: 0, sw: anim.fw, sh: anim.fh };
 }
 
 // ─── WebSocket ────────────────────────────────────────────────────────────────
@@ -423,7 +617,20 @@ function handleMessage(msg) {
       break;
 
     case 'state_update':
+      // Snapshot previous sub-positions so the renderer can interpolate between ticks
+      if (G.snapshot) {
+        const liveIds = new Set();
+        for (const v of msg.snapshot.villagers) liveIds.add(v.id);
+        for (const v of G.snapshot.villagers) {
+          if (liveIds.has(v.id)) {
+            const sp = v.subPosition ?? v.position;
+            G.villagerPrevPos.set(v.id, { x: sp.x, y: sp.y });
+          }
+        }
+        for (const id of G.villagerPrevPos.keys()) if (!liveIds.has(id)) G.villagerPrevPos.delete(id);
+      }
       G.snapshot = msg.snapshot;
+      G.lastSnapshotTime = performance.now();
       G.myPlayerIndex = G.snapshot.players.findIndex(p => p.id === G.playerId);
       updateFogOfWar();
       updateHUD();
@@ -514,11 +721,33 @@ const CAM_SPEED_PX = 12;  // pixels per frame
 function mapWidth()  { return G.mapTiles?.[0]?.length ?? 100; }
 function mapHeight() { return G.mapTiles?.length        ?? 100; }
 
+// Zoom in/out while keeping the screen center anchored on the same world point.
+// The minimap element size stays fixed; only the viewport rectangle inside the
+// minimap scales (it gets smaller as the player zooms in, since less of the
+// world is visible) — that scaling is handled in `renderMinimap`.
+function setZoom(newZoom) {
+  const z = Math.max(G.zoomMin, Math.min(G.zoomMax, newZoom));
+  if (z === G.zoom) return;
+  if (G.canvas) {
+    // Keep the world point at the canvas center stationary across zoom changes.
+    const centerSX = G.camSX + G.canvas.width  / 2 / G.zoom;
+    const centerSY = G.camSY + G.canvas.height / 2 / G.zoom;
+    G.zoom = z;
+    G.camSX = centerSX - G.canvas.width  / 2 / G.zoom;
+    G.camSY = centerSY - G.canvas.height / 2 / G.zoom;
+    clampCamera();
+  } else {
+    G.zoom = z;
+  }
+}
+
 function clampCamera() {
   if (!G.canvas) return;
   const ext = worldExtent();
-  const maxX = Math.max(0, ext.w - G.canvas.width);
-  const maxY = Math.max(0, ext.h - G.canvas.height);
+  // The visible world area shrinks/expands with zoom — only need to leave
+  // canvas.{width,height}/zoom pixels of world to the right/bottom.
+  const maxX = Math.max(0, ext.w - G.canvas.width  / G.zoom);
+  const maxY = Math.max(0, ext.h - G.canvas.height / G.zoom);
   G.camSX = Math.max(0, Math.min(maxX, G.camSX));
   G.camSY = Math.max(0, Math.min(maxY, G.camSY));
 }
@@ -544,7 +773,12 @@ function render() {
   ctx.fillRect(0, 0, canvas.width, canvas.height);
 
   ctx.save();
-  ctx.translate(-G.camSX, -G.camSY);
+  // Apply zoom first, then translate by camera in (unscaled) world pixels.
+  // Round the camera translate to integer pixels — sub-pixel translation makes
+  // the diamond-clipped tile edges antialias, leaving thin dark seams between tiles.
+  ctx.scale(G.zoom, G.zoom);
+  ctx.translate(-Math.round(G.camSX), -Math.round(G.camSY));
+  ctx.imageSmoothingEnabled = false;
 
   renderTiles();
   if (snapshot) renderEntitiesSorted(snapshot);
@@ -553,16 +787,30 @@ function render() {
 
   ctx.restore();
 
+  // Drag-select rectangle (drawn in canvas-pixel space, NOT world space)
+  if (G.isDragging && G.dragStart && G.dragCurrent) {
+    const x = Math.min(G.dragStart.x, G.dragCurrent.x);
+    const y = Math.min(G.dragStart.y, G.dragCurrent.y);
+    const w = Math.abs(G.dragCurrent.x - G.dragStart.x);
+    const h = Math.abs(G.dragCurrent.y - G.dragStart.y);
+    ctx.fillStyle = 'rgba(180, 220, 130, 0.15)';
+    ctx.strokeStyle = 'rgba(180, 220, 130, 0.9)';
+    ctx.lineWidth = 1;
+    ctx.fillRect(x, y, w, h);
+    ctx.strokeRect(x, y, w, h);
+  }
+
   renderMinimap();
 }
 
 // View culling helpers — given a tile or footprint, is any part on screen?
 function isTileInView(tx, ty, padPx = 0) {
   const { sx, sy } = worldToScreen(tx, ty);
+  // Visible world area is canvas.{width,height} / zoom (in unscaled iso pixels).
   const left = G.camSX - padPx;
   const top  = G.camSY - padPx;
-  const right  = G.camSX + G.canvas.width  + padPx;
-  const bottom = G.camSY + G.canvas.height + padPx;
+  const right  = G.camSX + G.canvas.width  / G.zoom + padPx;
+  const bottom = G.camSY + G.canvas.height / G.zoom + padPx;
   return sx + TILE_W / 2 >= left && sx - TILE_W / 2 <= right
       && sy + TILE_H >= top && sy <= bottom;
 }
@@ -934,9 +1182,24 @@ function renderTownCenter(snapshot, tc) {
 }
 
 // ── Villager (upright billboard at iso ground center) ──────────────────────
+// Interpolated position for smooth movement: lerps between the previous-snapshot
+// sub-position (float) and the current-snapshot sub-position across one server
+// tick (SERVER_TICK_MS).
+function interpVillagerPos(v) {
+  const cur = v.subPosition ?? v.position;
+  const prev = G.villagerPrevPos.get(v.id);
+  if (!prev) return { x: cur.x, y: cur.y };
+  const t = Math.min(1, (performance.now() - G.lastSnapshotTime) / SERVER_TICK_MS);
+  return {
+    x: prev.x + (cur.x - prev.x) * t,
+    y: prev.y + (cur.y - prev.y) * t,
+  };
+}
+
 function renderVillager(snapshot, v) {
   const ctx = G.ctx;
-  const { sx, sy } = worldToScreen(v.position.x, v.position.y);
+  const ipos = interpVillagerPos(v);
+  const { sx, sy } = worldToScreen(ipos.x, ipos.y);
   const cx = sx;                  // x at the diamond center
   const cy = sy + TILE_H / 2;     // ground-plane y (where feet land)
   const SPRITE_H = TILE_W * 0.85; // upright sprite height
@@ -944,6 +1207,7 @@ function renderVillager(snapshot, v) {
   const isOwn      = v.ownerId === G.playerId;
   const isSelected = G.selectedIds.has(v.id);
   const playerIdx  = snapshot.players.findIndex(p => p.id === v.ownerId);
+
 
   // Movement path line (target → iso)
   if (isSelected && v.state === 'moving' && v.moveTarget) {
@@ -996,7 +1260,16 @@ function renderVillager(snapshot, v) {
   // Unit body — drawn upright above ground center
   const pColor = COLORS.villager[playerIdx] ?? '#888';
   const headY = cy - SPRITE_H * 0.5;  // approximate head position for HP bar
-  if (v.unitType === 'archer') {
+  const slice = spriteForUnit(v);
+  if (slice) {
+    const w = TILE_W * 0.75;
+    const h = w;
+    ctx.drawImage(slice.img, slice.sx, slice.sy, slice.sw, slice.sh,
+                  cx - w / 2, cy - h * 0.95, w, h);
+    // Player color stripe under the sprite (foot mark)
+    ctx.fillStyle = pColor;
+    ctx.fillRect(cx - 5 * SPRITE_SCALE, cy - 2, 10 * SPRITE_SCALE, 2);
+  } else if (v.unitType === 'archer') {
     ctx.save();
     ctx.translate(cx, cy - SPRITE_H * 0.35);
     ctx.scale(SPRITE_SCALE, SPRITE_SCALE);
@@ -1009,24 +1282,14 @@ function renderVillager(snapshot, v) {
     drawCavalry(ctx, 0, 0, pColor);
     ctx.restore();
   } else {
-    const sprite = spriteForVillager(v);
-    if (sprite && sprite.complete && sprite.naturalWidth > 0) {
-      const w = TILE_W * 0.75;
-      const h = w;
-      ctx.drawImage(sprite, cx - w / 2, cy - h * 0.95, w, h);
-      // Player color stripe under the sprite (foot mark)
-      ctx.fillStyle = pColor;
-      ctx.fillRect(cx - 5 * SPRITE_SCALE, cy - 2, 10 * SPRITE_SCALE, 2);
-    } else {
-      ctx.save();
-      ctx.translate(cx, cy - SPRITE_H * 0.35);
-      ctx.scale(SPRITE_SCALE, SPRITE_SCALE);
-      ctx.fillStyle = pColor;
-      ctx.beginPath(); ctx.arc(0, 1, 7, 0, Math.PI * 2); ctx.fill();
-      ctx.fillStyle = '#d4a070';
-      ctx.beginPath(); ctx.arc(0, -5, 5, 0, Math.PI * 2); ctx.fill();
-      ctx.restore();
-    }
+    ctx.save();
+    ctx.translate(cx, cy - SPRITE_H * 0.35);
+    ctx.scale(SPRITE_SCALE, SPRITE_SCALE);
+    ctx.fillStyle = pColor;
+    ctx.beginPath(); ctx.arc(0, 1, 7, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = '#d4a070';
+    ctx.beginPath(); ctx.arc(0, -5, 5, 0, Math.PI * 2); ctx.fill();
+    ctx.restore();
   }
 
   // State indicator dot (own units only)
@@ -1057,6 +1320,37 @@ function renderVillager(snapshot, v) {
   }
 }
 
+// Pick the right frame index (0..4) from a 5-frame sheet based on construction
+// progress and the owner's era. 0=blueprint, 1=construction (50%+), 2=era1,
+// 3=era2, 4=era3.
+function buildingFrameIndex(b, era) {
+  if (b.status === 'under_construction') {
+    const total = b.constructionTotalTicks || 1;
+    const done  = total - (b.constructionTicksRemaining ?? 0);
+    return done / total < 0.5 ? 0 : 1;
+  }
+  const e = Math.max(1, Math.min(MAX_ERA, era || 1));
+  return 1 + e;  // era 1 → 2, era 2 → 3, era 3 → 4
+}
+
+// Draw one frame of a 5-state sheet positioned over a building footprint.
+// Returns the topAnchor used for HP bars.
+function drawBuildingSheet(sheet, b, frameIdx, meta) {
+  const ctx = G.ctx;
+  const w = b.width  ?? BUILDING_DEFS[b.type]?.width  ?? 1;
+  const h = b.height ?? BUILDING_DEFS[b.type]?.height ?? 1;
+  const ground = worldToScreen(b.x + w / 2, b.y + h / 2);
+  const cx = ground.sx;
+  const cy = ground.sy + TILE_H / 2;
+  const drawW = TILE_W * Math.max(w, h) * (meta.drawScale ?? 1.7);
+  const drawH = drawW * (meta.fh / meta.fw);
+  const footRatio = meta.footRatio ?? 0.70;
+  const dx = cx - drawW / 2;
+  const dy = cy - drawH * footRatio;
+  ctx.drawImage(sheet, frameIdx * meta.fw, 0, meta.fw, meta.fh, dx, dy, drawW, drawH);
+  return { sx: cx, sy: dy + drawH * 0.05 };
+}
+
 // ── Player Building (iso 3D boxes by type) ──────────────────────────────────
 function renderPlayerBuilding(snapshot, b) {
   const ctx = G.ctx;
@@ -1070,6 +1364,21 @@ function renderPlayerBuilding(snapshot, b) {
   let topAnchor = null;  // top-most screen point of the rendered structure (for HP bars)
   let corners;
 
+  // Sprite-sheet path: if this building type has a registered 5-frame sheet,
+  // use it (frame chosen by construction progress + owner's era). Falls through
+  // to the shared HP-bar / construction-progress code below.
+  const meta = BUILDING_SPRITE_META[b.type];
+  const sheet = meta && G.buildingSprites?.[b.type];
+  let renderedAsSheet = false;
+  if (sheet) {
+    const ownerPlayer = snapshot.players.find(p => p.id === b.ownerId);
+    const era = ownerPlayer?.era ?? 1;
+    const idx = buildingFrameIndex(b, era);
+    topAnchor = drawBuildingSheet(sheet, b, idx, meta);
+    renderedAsSheet = true;
+  }
+
+  if (renderedAsSheet) { /* skip procedural switch */ } else
   switch (b.type) {
     case 'wall': {
       // Wall material: 'wood' (initial) or 'stone' (upgraded).
@@ -1254,32 +1563,34 @@ function renderPlayerBuilding(snapshot, b) {
     ctx.fillRect(barX, barY, Math.round(barW * pct), 4);
   }
 
-  // Under-construction overlay: scaffolding + progress bar over the diamond footprint
+  // Under-construction overlay: scaffolding + progress bar over the diamond footprint.
+  // For sheet-rendered buildings, skip the dark scaffolding overlay (the sheet's
+  // frame 0/1 already conveys the state visually) — but still draw the progress bar.
   if (b.status === 'under_construction') {
     const top    = worldToScreen(b.x,     b.y);
     const right  = worldToScreen(b.x + w, b.y);
     const bottom = worldToScreen(b.x + w, b.y + h);
     const left   = worldToScreen(b.x,     b.y + h);
-    ctx.save();
-    // Semi-transparent dark over the projected building
-    ctx.beginPath();
-    ctx.moveTo(top.sx,    top.sy);
-    ctx.lineTo(right.sx,  right.sy);
-    ctx.lineTo(bottom.sx, bottom.sy);
-    ctx.lineTo(left.sx,   left.sy);
-    ctx.closePath();
-    ctx.fillStyle = 'rgba(0,0,0,0.45)';
-    ctx.fill();
-    // Scaffolding diagonals
-    ctx.strokeStyle = '#c8a040';
-    ctx.lineWidth = 1.5;
-    ctx.setLineDash([3, 3]);
-    ctx.beginPath();
-    ctx.moveTo(top.sx,    top.sy);    ctx.lineTo(bottom.sx, bottom.sy);
-    ctx.moveTo(right.sx,  right.sy);  ctx.lineTo(left.sx,   left.sy);
-    ctx.stroke();
-    ctx.setLineDash([]);
-    ctx.restore();
+    if (!renderedAsSheet) {
+      ctx.save();
+      ctx.beginPath();
+      ctx.moveTo(top.sx,    top.sy);
+      ctx.lineTo(right.sx,  right.sy);
+      ctx.lineTo(bottom.sx, bottom.sy);
+      ctx.lineTo(left.sx,   left.sy);
+      ctx.closePath();
+      ctx.fillStyle = 'rgba(0,0,0,0.45)';
+      ctx.fill();
+      ctx.strokeStyle = '#c8a040';
+      ctx.lineWidth = 1.5;
+      ctx.setLineDash([3, 3]);
+      ctx.beginPath();
+      ctx.moveTo(top.sx,    top.sy);    ctx.lineTo(bottom.sx, bottom.sy);
+      ctx.moveTo(right.sx,  right.sy);  ctx.lineTo(left.sx,   left.sy);
+      ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.restore();
+    }
 
     // Progress bar near the bottom corner of the diamond
     const pct = 1 - (b.constructionTicksRemaining / b.constructionTotalTicks);
@@ -1308,6 +1619,16 @@ function renderBuildingGhost() {
   const right  = worldToScreen(tx + def.width, ty);
   const bottom = worldToScreen(tx + def.width, ty + def.height);
   const left   = worldToScreen(tx,             ty + def.height);
+
+  // Blueprint preview from sprite (frame 0) if this building has a sheet.
+  const meta = BUILDING_SPRITE_META[G.placingBuildingType];
+  const sheet = meta && G.buildingSprites?.[G.placingBuildingType];
+  if (sheet) {
+    ctx.save();
+    ctx.globalAlpha = 0.65;
+    drawBuildingSheet(sheet, { x: tx, y: ty, width: def.width, height: def.height }, 0, meta);
+    ctx.restore();
+  }
 
   ctx.save();
   ctx.beginPath();
@@ -1536,8 +1857,14 @@ function drawCavalry(ctx, cx, cy, playerColor) {
 // ─── Utility ──────────────────────────────────────────────────────────────────
 function pixelToTile(e) {
   const rect = G.canvas.getBoundingClientRect();
-  const sx = e.clientX - rect.left + G.camSX;
-  const sy = e.clientY - rect.top  + G.camSY;
+  // Account for any CSS scaling of the canvas, then undo the zoom transform
+  // before converting back to world iso coords.
+  const cssToCanvasX = G.canvas.width  / rect.width;
+  const cssToCanvasY = G.canvas.height / rect.height;
+  const cx = (e.clientX - rect.left) * cssToCanvasX;
+  const cy = (e.clientY - rect.top)  * cssToCanvasY;
+  const sx = cx / G.zoom + G.camSX;
+  const sy = cy / G.zoom + G.camSY;
   const w = screenToWorld(sx, sy);
   return { tx: Math.floor(w.tx), ty: Math.floor(w.ty) };
 }
@@ -1577,17 +1904,135 @@ function enemyTargetAt(tx, ty) {
   return null;
 }
 
+// Friendly unit at tile — used for friendly-fire testing (Alt+right-click).
+function friendlyUnitAt(tx, ty) {
+  if (!G.snapshot) return null;
+  for (const v of G.snapshot.villagers) {
+    if (v.ownerId !== G.playerId) continue;
+    if (v.state === 'dying') continue;
+    if (v.position.x === tx && v.position.y === ty) return { id: v.id, kind: 'unit' };
+  }
+  return null;
+}
+
+// Map a mouse event to canvas-pixel coordinates (accounting for any CSS scaling).
+function eventToCanvasXY(e) {
+  const rect = G.canvas.getBoundingClientRect();
+  return {
+    x: (e.clientX - rect.left) * (G.canvas.width  / rect.width),
+    y: (e.clientY - rect.top)  * (G.canvas.height / rect.height),
+  };
+}
+
+// Villager screen position in canvas-pixel coords (matches what's rendered).
+function villagerScreenXY(v) {
+  const ipos = interpVillagerPos(v);
+  const { sx, sy } = worldToScreen(ipos.x, ipos.y);
+  return {
+    x: (sx - G.camSX) * G.zoom,
+    y: (sy + TILE_H / 2 - G.camSY) * G.zoom,
+  };
+}
+
+// Generate up to `count` 2D offsets in concentric squares around (0, 0), used as
+// formation slot positions when several units are commanded to the same spot.
+// First offset is the center, then the 8 neighbors (r=1), then the 16 of r=2, etc.
+function formationOffsets(count) {
+  const out = [];
+  for (let r = 0; out.length < count; r++) {
+    if (r === 0) { out.push({ x: 0, y: 0 }); continue; }
+    for (let dy = -r; dy <= r; dy++) {
+      for (let dx = -r; dx <= r; dx++) {
+        if (Math.max(Math.abs(dx), Math.abs(dy)) === r) out.push({ x: dx, y: dy });
+        if (out.length >= count) break;
+      }
+      if (out.length >= count) break;
+    }
+  }
+  return out.slice(0, count);
+}
+
+// Issue move commands to every selected unit so they end up forming a grid
+// around (tx, ty). The unit closest to the target gets the center slot.
+function moveSelectedToFormation(tx, ty) {
+  if (!G.snapshot) return;
+  const ids = [...G.selectedIds];
+  if (ids.length === 0) return;
+  if (ids.length === 1) {
+    send({ type: 'move_villager', villagerId: ids[0], destination: { x: tx, y: ty } });
+    return;
+  }
+  const units = ids
+    .map(id => G.snapshot.villagers.find(v => v.id === id))
+    .filter(Boolean);
+  // Closest unit to the target goes to the center slot of the formation.
+  units.sort((a, b) =>
+    (Math.abs(a.position.x - tx) + Math.abs(a.position.y - ty)) -
+    (Math.abs(b.position.x - tx) + Math.abs(b.position.y - ty)));
+  const offsets = formationOffsets(units.length);
+  for (let i = 0; i < units.length; i++) {
+    send({
+      type: 'move_villager',
+      villagerId: units[i].id,
+      destination: { x: tx + offsets[i].x, y: ty + offsets[i].y },
+    });
+  }
+}
+
 // ─── Input ────────────────────────────────────────────────────────────────────
 function setupInput() {
-  // Track cursor tile for ghost preview
+  // Track cursor tile for ghost preview + update drag-current for the selection box
   G.canvas.addEventListener('mousemove', (e) => {
     G.ghostTile = pixelToTile(e);
+    if (G.dragStart) {
+      G.dragCurrent = eventToCanvasXY(e);
+      const dx = G.dragCurrent.x - G.dragStart.x;
+      const dy = G.dragCurrent.y - G.dragStart.y;
+      if (Math.hypot(dx, dy) > 5) G.isDragging = true;
+    }
   });
   G.canvas.addEventListener('mouseleave', () => {
     G.ghostTile = null;
   });
 
+  // Begin drag-select on left mousedown (skip when in placement mode).
+  G.canvas.addEventListener('mousedown', (e) => {
+    if (e.button !== 0) return;
+    if (G.placingBuildingType) return;
+    G.dragStart = eventToCanvasXY(e);
+    G.dragCurrent = { ...G.dragStart };
+    G.isDragging = false;
+  });
+
+  // Finish drag-select; if it was a real drag (vs a click), pick all own units inside.
+  G.canvas.addEventListener('mouseup', (e) => {
+    if (e.button !== 0) return;
+    if (!G.dragStart) return;
+    const wasDragging = G.isDragging;
+    if (wasDragging) {
+      const a = G.dragStart, b = G.dragCurrent;
+      const left   = Math.min(a.x, b.x);
+      const top    = Math.min(a.y, b.y);
+      const right  = Math.max(a.x, b.x);
+      const bottom = Math.max(a.y, b.y);
+      if (!e.shiftKey) G.selectedIds.clear();
+      for (const v of G.snapshot?.villagers ?? []) {
+        if (v.ownerId !== G.playerId) continue;
+        const p = villagerScreenXY(v);
+        if (p.x >= left && p.x <= right && p.y >= top && p.y <= bottom) {
+          G.selectedIds.add(v.id);
+        }
+      }
+      updatePanel();
+      G.swallowNextClick = true; // the upcoming `click` event was a drag
+    }
+    G.dragStart = null;
+    G.dragCurrent = null;
+    G.isDragging = false;
+  });
+
   G.canvas.addEventListener('click', (e) => {
+    if (G.swallowNextClick) { G.swallowNextClick = false; return; }
     const { tx, ty } = pixelToTile(e);
 
     // Building placement mode
@@ -1620,12 +2065,14 @@ function setupInput() {
 
     const { tx, ty } = pixelToTile(e);
 
-    // Check for attack target (enemy unit / building / TC)
-    const attackTarget = enemyTargetAt(tx, ty);
+    // Check for attack target (enemy unit / building / TC).
+    // Alt+right-click also allows targeting friendly units — useful for testing
+    // death animations against your own archer/cavalry without a second player.
+    const attackTarget = enemyTargetAt(tx, ty) ?? (e.altKey ? friendlyUnitAt(tx, ty) : null);
     if (attackTarget) {
       for (const vid of G.selectedIds) {
         const v = G.snapshot?.villagers.find(x => x.id === vid);
-        if (v && v.unitType !== 'villager') {
+        if (v && v.id !== attackTarget.id) {
           send({ type: 'attack_target', villagerId: vid, targetId: attackTarget.id, targetKind: attackTarget.kind });
         }
       }
@@ -1636,7 +2083,7 @@ function setupInput() {
     if (node) {
       for (const vid of G.selectedIds) send({ type: 'gather_resource', villagerId: vid, nodeId: node.id });
     } else {
-      for (const vid of G.selectedIds) send({ type: 'move_villager', villagerId: vid, destination: { x: tx, y: ty } });
+      moveSelectedToFormation(tx, ty);
     }
   });
 
@@ -1657,6 +2104,10 @@ function setupInput() {
     btn.addEventListener('click', () => {
       send({ type: 'train_villager', unitType: btn.dataset.unit });
     });
+  });
+
+  document.getElementById('btn-advance-era')?.addEventListener('click', () => {
+    send({ type: 'advance_era' });
   });
 }
 
@@ -1683,6 +2134,24 @@ function updateHUD() {
   document.getElementById('btn-train').disabled         = training || r.food < 50;
   document.getElementById('btn-train-archer').disabled  = training || r.food < 50 || r.wood < 30;
   document.getElementById('btn-train-cavalry').disabled = training || r.food < 80 || r.gold < 50;
+
+  // Era HUD + advance-era button
+  const era = me.era ?? 1;
+  const hudEra = document.getElementById('hud-era');
+  if (hudEra) hudEra.textContent = `Era ${era}`;
+  const eraBtn  = document.getElementById('btn-advance-era');
+  const eraCost = document.getElementById('era-cost-label');
+  if (eraBtn && eraCost) {
+    if (era >= MAX_ERA) {
+      eraBtn.disabled = true;
+      eraCost.textContent = 'Era máxima';
+    } else {
+      const c = ERA_UP_COSTS[era + 1];
+      const afford = r.gold >= c.gold && r.wood >= c.wood && r.stone >= c.stone && r.food >= c.food;
+      eraBtn.disabled = !afford;
+      eraCost.textContent = `🪙 ${c.gold} 🪵 ${c.wood} 🪨 ${c.stone} 🍖 ${c.food}`;
+    }
+  }
 
   const trainEl = document.getElementById('train-status');
   if (training && myTc) {
@@ -1735,8 +2204,8 @@ function hideLobby() {
   // Center camera on the player's town-center spawn (iso projected)
   const myAnchor = G.myPlayerIndex === 0 ? { x: 2, y: 2 } : { x: 54, y: 54 };
   const { sx, sy } = worldToScreen(myAnchor.x + 1.5, myAnchor.y + 1.5);
-  G.camSX = sx - G.canvas.width  / 2;
-  G.camSY = sy - G.canvas.height / 2;
+  G.camSX = sx - G.canvas.width  / 2 / G.zoom;
+  G.camSY = sy - G.canvas.height / 2 / G.zoom;
   clampCamera();
 
   if (!G.animFrameId) gameLoop();
@@ -1928,8 +2397,9 @@ function renderMinimap() {
   const mainToMini = s / TILE_H; // = 2*s/TILE_W (iso 2:1)
   const vx = G.camSX * mainToMini + (ox - mapHeight() * s);
   const vy = G.camSY * mainToMini + oy;
-  const vw = G.canvas.width  * mainToMini;
-  const vh = G.canvas.height * mainToMini;
+  // Visible world area shrinks/grows with zoom — viewport rect on minimap follows.
+  const vw = (G.canvas.width  / G.zoom) * mainToMini;
+  const vh = (G.canvas.height / G.zoom) * mainToMini;
   mctx.strokeStyle = 'rgba(255,255,255,0.9)';
   mctx.lineWidth = 1.5;
   mctx.fillStyle = 'rgba(255,255,255,0.08)';
@@ -1956,8 +2426,8 @@ function moveCameraToMinimapPoint(clientX, clientY) {
   const targetTileX = (a + b) / 2;
   const targetTileY = (b - a) / 2;
   const { sx, sy } = worldToScreen(targetTileX, targetTileY);
-  G.camSX = sx - G.canvas.width  / 2;
-  G.camSY = sy - G.canvas.height / 2;
+  G.camSX = sx - G.canvas.width  / 2 / G.zoom;
+  G.camSY = sy - G.canvas.height / 2 / G.zoom;
   clampCamera();
 }
 
@@ -2008,6 +2478,10 @@ function setupMinimapInput() {
   document.getElementById('name-input').addEventListener('keydown', (e) => {
     if (e.key === 'Enter') document.getElementById('join-btn').click();
   });
+
+  // Zoom buttons
+  document.getElementById('btn-zoom-in') ?.addEventListener('click', () => setZoom(G.zoom + G.zoomStep));
+  document.getElementById('btn-zoom-out')?.addEventListener('click', () => setZoom(G.zoom - G.zoomStep));
 
   // Building bar buttons
   document.querySelectorAll('.build-btn').forEach(btn => {
