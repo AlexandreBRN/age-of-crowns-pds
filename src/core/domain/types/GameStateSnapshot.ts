@@ -12,6 +12,7 @@ export interface VillagerDTO {
   constructTarget: string | null;
   attackTargetId: string | null;
   attackTargetKind: 'unit' | 'building' | 'town_center' | null;
+  attackInRange: boolean;                   // true só quando o alvo está dentro do alcance (anima ataque); false = ainda se aproximando
   dyingTicks: number;
 }
 

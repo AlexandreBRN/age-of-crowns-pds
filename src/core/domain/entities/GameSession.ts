@@ -270,7 +270,10 @@ export class GameSession {
         Math.abs(attacker.y - targetPos.y),
       );
 
-      if (dist <= cfg.attackRange) {
+      const inRange = dist <= cfg.attackRange;
+      attacker.setAttackInRange(inRange);
+
+      if (inRange) {
         // In range: deal damage on cooldown
         attacker.incrementAttackCounter();
         if (attacker.attackTickCounter >= cfg.attackCooldownTicks) {

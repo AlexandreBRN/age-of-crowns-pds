@@ -15,6 +15,11 @@ export interface UnitConfig {
   trainTicks: number;
 }
 
+// Distância (em tiles, Chebyshev) que o Cavaleiro precisa estar do alvo para
+// atacar em combate corpo a corpo. Fora desse alcance ele interrompe a animação
+// de ataque e continua se aproximando. Ajuste aqui para mudar o alcance no futuro.
+export const CAVALRY_ATTACK_RANGE = 1;
+
 export const UNIT_CONFIGS: Record<UnitType, UnitConfig> = {
   villager: {
     label: 'Aldeão',
@@ -40,7 +45,7 @@ export const UNIT_CONFIGS: Record<UnitType, UnitConfig> = {
     label: 'Cavaleiro',
     maxHp: 80,
     attackDamage: 15,
-    attackRange: 1,
+    attackRange: CAVALRY_ATTACK_RANGE,
     attackCooldownTicks: 3,  // ~1.3 attacks/sec
     moveSpeedTiles: 0.40,     // ~1.6 tiles/sec — 2× villager, faster than archer
     trainCost: { food: 80, gold: 50 },
@@ -71,6 +76,7 @@ export class Villager {
   private _attackTargetId: string | null = null;
   private _attackTargetKind: AttackTargetKind | null = null;
   private _attackTickCounter = 0;
+  private _attackInRange = false; // true só quando o alvo está dentro do alcance de ataque
   private _dyingTickCounter = 0; // ticks spent in 'dying' state after hp <= 0
 
   constructor(
@@ -106,6 +112,10 @@ export class Villager {
   get attackTargetKind(): AttackTargetKind | null { return this._attackTargetKind; }
   get attackTickCounter(): number { return this._attackTickCounter; }
   get gatherTickCounter(): number { return this._gatherTickCounter; }
+  get attackInRange(): boolean { return this._attackInRange; }
+
+  /** Atualizado a cada tick pela fase de combate: alvo dentro do alcance? */
+  setAttackInRange(inRange: boolean): void { this._attackInRange = inRange; }
 
   commandMove(destX: number, destY: number): void {
     this._moveTargetX = destX;
@@ -159,6 +169,7 @@ export class Villager {
     this._moveTargetY = null;
     this._path = [];
     this._attackTickCounter = 0;
+    this._attackInRange = false; // começa se aproximando até a fase de combate confirmar alcance
     this._state = 'attacking';
   }
 
@@ -345,6 +356,7 @@ export class Villager {
       constructTarget: this._constructTargetId,
       attackTargetId: this._attackTargetId,
       attackTargetKind: this._attackTargetKind,
+      attackInRange: this._attackInRange,
       dyingTicks: this._dyingTickCounter,
     };
   }

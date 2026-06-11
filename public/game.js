@@ -503,9 +503,15 @@ function animKeyForState(v, unitSet) {
     const variants = ['dying', 'dead'].filter(has);
     if (variants.length > 0) return variants[hashStr(v.id) % variants.length];
   }
-  if (v.state === 'attacking') {
+  // Só anima o ataque quando o alvo está de fato no alcance. Fora do alcance a
+  // unidade está se aproximando, então cai no ramo de movimento abaixo.
+  if (v.state === 'attacking' && v.attackInRange) {
     if (has('shot'))    return 'shot';    // archer
     if (has('attack'))  return 'attack';  // villager / cavalry
+  }
+  if (v.state === 'attacking' && !v.attackInRange) {
+    if (v.unitType === 'cavalry' && has('running')) return 'running';
+    return has('walking') ? 'walking' : Object.keys(unitSet)[0];
   }
   if (v.state === 'constructing' && has('hammer')) return 'hammer';
   if (v.state === 'gathering'    && has('gather')) return 'gather';
@@ -523,8 +529,10 @@ function spriteForUnit(v) {
   const unitSet = G.sprites[v.unitType];
   if (!unitSet) return null;
 
-  // Direction tracking (shared across animations) — updated only while moving.
-  const moving = v.state === 'moving' && v.moveTarget;
+  // Direction tracking (shared across animations) — updated while moving, including
+  // while approaching an attack target (out of range), so the unit faces where it walks.
+  const approaching = v.state === 'attacking' && !v.attackInRange;
+  const moving = (v.state === 'moving' && v.moveTarget) || approaching;
   let dirKey = null;
   if (moving) {
     const cur = v.subPosition ?? v.position;
@@ -532,7 +540,7 @@ function spriteForUnit(v) {
     const EPS = 1e-3;
     if (prev && (Math.abs(prev.x - cur.x) > EPS || Math.abs(prev.y - cur.y) > EPS)) {
       dirKey = directionForMove(cur.x - prev.x, cur.y - prev.y);
-    } else {
+    } else if (v.moveTarget) {
       dirKey = directionForMove(v.moveTarget.x - cur.x, v.moveTarget.y - cur.y);
     }
     if (dirKey) G.villagerDir.set(v.id, dirKey);
