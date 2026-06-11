@@ -151,6 +151,7 @@ export class GameSession {
   commandVillagerGather(villagerId: string, nodeId: string): void {
     const villager = this._villagers.get(villagerId);
     if (!villager) throw new Error('Aldeão não encontrado');
+    if (villager.unitType !== 'villager') throw new Error('Apenas aldeões podem coletar recursos');
     if (villager.state === 'constructing' || villager.constructTargetId !== null) {
       throw new Error('Aldeão ocupado construindo');
     }

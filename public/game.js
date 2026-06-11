@@ -2102,7 +2102,13 @@ function setupInput() {
 
     const node = resourceAtTile(tx, ty);
     if (node) {
-      for (const vid of G.selectedIds) send({ type: 'gather_resource', villagerId: vid, nodeId: node.id });
+      // Only villagers can gather — archers/cavalry ignore the command.
+      for (const vid of G.selectedIds) {
+        const v = G.snapshot?.villagers.find(x => x.id === vid);
+        if (v && v.unitType === 'villager') {
+          send({ type: 'gather_resource', villagerId: vid, nodeId: node.id });
+        }
+      }
     } else {
       moveSelectedToFormation(tx, ty);
     }
