@@ -54,6 +54,7 @@ export interface PlayerBuildingDTO {
   constructionTotalTicks: number;
   hp: number;
   maxHp: number;
+  cells?: { x: number; y: number }[];       // footprint contínuo (muros) — presente só em muros
 }
 
 export interface GameStateSnapshot {

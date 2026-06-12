@@ -6,6 +6,8 @@ import { IGatherResourceUseCase } from '../../../core/application/ports/in/IGath
 import { ITrainVillagerUseCase } from '../../../core/application/ports/in/ITrainVillagerUseCase';
 import { IPlaceBuildingUseCase } from '../../../core/application/ports/in/IPlaceBuildingUseCase';
 import { IConstructBuildingUseCase } from '../../../core/application/ports/in/IConstructBuildingUseCase';
+import { IPlaceWallUseCase } from '../../../core/application/ports/in/IPlaceWallUseCase';
+import { IPlaceGateUseCase } from '../../../core/application/ports/in/IPlaceGateUseCase';
 import { IAdvanceEraUseCase } from '../../../core/application/ports/in/IAdvanceEraUseCase';
 import { ISessionRepository } from '../../../core/application/ports/out/ISessionRepository';
 import { GameLoopService } from '../../../core/application/services/GameLoopService';
@@ -20,6 +22,8 @@ export class WebSocketAdapter {
     private readonly trainVillagerUseCase: ITrainVillagerUseCase,
     private readonly placeBuildingUseCase: IPlaceBuildingUseCase,
     private readonly constructBuildingUseCase: IConstructBuildingUseCase,
+    private readonly placeWallUseCase: IPlaceWallUseCase,
+    private readonly placeGateUseCase: IPlaceGateUseCase,
     private readonly advanceEraUseCase: IAdvanceEraUseCase,
     private readonly sessionRepository: ISessionRepository,
     private readonly clientRegistry: ClientRegistry,
@@ -113,6 +117,26 @@ export class WebSocketAdapter {
           playerId: currentPlayerId,
           villagerId: String(message.villagerId),
           buildingId: String(message.buildingId),
+        });
+        break;
+
+      case 'place_wall':
+        this.placeWallUseCase.execute({
+          playerId: currentPlayerId,
+          startX: Number(message.startX),
+          startY: Number(message.startY),
+          endX: Number(message.endX),
+          endY: Number(message.endY),
+          villagerId: message.villagerId ? String(message.villagerId) : undefined,
+        });
+        break;
+
+      case 'place_gate':
+        this.placeGateUseCase.execute({
+          playerId: currentPlayerId,
+          x: Number(message.x),
+          y: Number(message.y),
+          villagerId: message.villagerId ? String(message.villagerId) : undefined,
         });
         break;
 

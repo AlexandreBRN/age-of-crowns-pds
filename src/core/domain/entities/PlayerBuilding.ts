@@ -1,5 +1,6 @@
 export type PlayerBuildingType =
   | 'wall'
+  | 'gate'
   | 'watchtower'
   | 'lumber_camp'
   | 'gold_mine'
@@ -28,6 +29,11 @@ export interface BuildingConfig {
   blocksMovement: boolean;
 }
 
+// Quanto tempo (em ticks) cada segmento de muro leva para ser construído.
+// 4 ticks = 1 segundo (loop a 250ms). Um muro contínuo de N segmentos leva N
+// segundos no total. Ajuste aqui para alterar a velocidade de construção do muro.
+export const TICKS_PER_WALL_SEGMENT = 4;
+
 export const BUILDING_CONFIGS: Record<PlayerBuildingType, BuildingConfig> = {
   wall: {
     label: 'Muro',
@@ -36,6 +42,15 @@ export const BUILDING_CONFIGS: Record<PlayerBuildingType, BuildingConfig> = {
     cost: { stone: 2 },
     constructionTicks: 8,
     maxHp: 150,
+    blocksMovement: true,
+  },
+  gate: {
+    label: 'Portão',
+    description: 'Passagem na muralha: suas tropas atravessam, inimigos não.',
+    width: 1, height: 1,
+    cost: { wood: 10, stone: 5 },
+    constructionTicks: 8,
+    maxHp: 200,
     blocksMovement: true,
   },
   watchtower: {
@@ -96,6 +111,9 @@ export class PlayerBuilding {
   private readonly _constructionTotalTicks: number;
   private _hp: number;
   private readonly _maxHp: number;
+  // Footprint explícito em tiles. Usado por muros, que são uma única construção
+  // contínua cobrindo vários tiles em linha. null = construção retangular normal.
+  private readonly _cells: { x: number; y: number }[] | null;
 
   constructor(
     private readonly _id: string,
@@ -104,12 +122,18 @@ export class PlayerBuilding {
     private readonly _x: number,
     private readonly _y: number,
     hpMultiplier = 1.0,
+    cells?: { x: number; y: number }[],
   ) {
     const cfg = BUILDING_CONFIGS[_type];
-    this._constructionTotalTicks = cfg.constructionTicks;
-    this._constructionTicksRemaining = cfg.constructionTicks;
+    this._cells = cells && cells.length > 0 ? cells.map(c => ({ x: c.x, y: c.y })) : null;
+    const segments = this._cells ? this._cells.length : 1;
+    // Footprint contínuo (muro): cada segmento leva TICKS_PER_WALL_SEGMENT; o tempo
+    // total é a soma. HP também escala por segmento.
+    const totalTicks = this._cells ? segments * TICKS_PER_WALL_SEGMENT : cfg.constructionTicks;
+    this._constructionTotalTicks = totalTicks;
+    this._constructionTicksRemaining = totalTicks;
     this._status = 'under_construction';
-    this._maxHp = Math.floor(cfg.maxHp * hpMultiplier);
+    this._maxHp = Math.floor(cfg.maxHp * hpMultiplier) * segments;
     this._hp = this._maxHp;
   }
 
@@ -146,6 +170,7 @@ export class PlayerBuilding {
   }
 
   get occupiedTiles(): { x: number; y: number }[] {
+    if (this._cells) return this._cells.map(c => ({ x: c.x, y: c.y }));
     const tiles: { x: number; y: number }[] = [];
     for (let dy = 0; dy < this.height; dy++) {
       for (let dx = 0; dx < this.width; dx++) {
@@ -168,7 +193,8 @@ export class PlayerBuilding {
       constructionTicksRemaining: this._constructionTicksRemaining,
       constructionTotalTicks: this._constructionTotalTicks,
       hp: this._hp,
-      maxHp: this.config.maxHp,
+      maxHp: this._cells ? this._maxHp : this.config.maxHp,
+      ...(this._cells ? { cells: this._cells.map(c => ({ x: c.x, y: c.y })) } : {}),
     };
   }
 }

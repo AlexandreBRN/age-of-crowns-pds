@@ -2,7 +2,7 @@ import { v4 as uuidv4 } from 'uuid';
 import { Villager, UnitType, UNIT_CONFIGS, AttackTargetKind } from './Villager';
 import { TownCenter } from './TownCenter';
 import { ResourceNode, RESOURCE_YIELD } from './ResourceNode';
-import { PlayerBuilding, PlayerBuildingType, BUILDING_CONFIGS } from './PlayerBuilding';
+import { PlayerBuilding, PlayerBuildingType, BUILDING_CONFIGS, BuildingCost } from './PlayerBuilding';
 import { VillagerId } from '../value-objects/VillagerId';
 import { Resources } from '../value-objects/Resources';
 import { TileType, TILE_WALKABLE } from '../value-objects/TileType';
@@ -144,7 +144,7 @@ export class GameSession {
       throw new Error('Aldeão ocupado construindo');
     }
     if (!this._isTileWalkable(destX, destY)) throw new Error('Destino inválido');
-    if (this._isTileBlockedByCompleteBuilding(destX, destY)) throw new Error('Tile bloqueado por muro');
+    if (this._isTileBlockedByCompleteBuildingFor(villager.ownerId, destX, destY)) throw new Error('Tile bloqueado por muro');
     villager.commandMove(destX, destY);
   }
 
@@ -170,7 +170,14 @@ export class GameSession {
     if (!building) throw new Error('Construção não encontrada');
     if (building.ownerId !== villager.ownerId) throw new Error('Construção não pertence a você');
     if (building.isComplete) throw new Error('Construção já concluída');
-    const dest = this._adjacentTile(building.x, building.y, building.width, building.height);
+    // Muro: o aldeão vai até o segmento mais próximo. Demais construções: adjacente à área.
+    let dest: { x: number; y: number } | null;
+    if (building.type === 'wall') {
+      const near = this._nearestCell(building.occupiedTiles, villager.x, villager.y);
+      dest = this._adjacentTile(near.x, near.y, 1, 1);
+    } else {
+      dest = this._adjacentTile(building.x, building.y, building.width, building.height);
+    }
     if (dest) villager.commandConstruct(building.id, dest.x, dest.y);
   }
 
@@ -236,16 +243,132 @@ export class GameSession {
     }
   }
 
+  /**
+   * Constrói um muro contínuo do ponto inicial ao final. A linha é "encaixada" em
+   * uma das 8 direções isométricas (horizontal, vertical ou diagonal) e todos os
+   * segmentos viram UMA única construção contínua. O custo e o tempo escalam pelo
+   * número de segmentos. O aldeão vai até o segmento mais próximo dele.
+   */
+  placeWall(playerId: string, startX: number, startY: number, endX: number, endY: number, villagerId?: string): void {
+    const player = this._players.get(playerId);
+    if (!player) throw new Error('Jogador não encontrado');
+
+    const cells = this._wallCells(startX, startY, endX, endY);
+
+    // Cada segmento precisa de terreno válido e não pode cair sobre outra construção ativa.
+    for (const c of cells) {
+      if (!this._isTileWalkable(c.x, c.y)) throw new Error('Não é possível construir muro neste terreno');
+      if (this._isTileOccupiedByBuilding(c.x, c.y)) throw new Error('Não é possível construir muro sobre outra construção');
+    }
+
+    const config = BUILDING_CONFIGS.wall;
+    const totalCost: BuildingCost = {};
+    (Object.keys(config.cost) as (keyof BuildingCost)[]).forEach(k => {
+      totalCost[k] = (config.cost[k] ?? 0) * cells.length;
+    });
+    if (!player.resources.canAfford(totalCost)) {
+      throw new Error('Recursos insuficientes para construir o muro');
+    }
+
+    const hpMult = ERA_HP_MULT[player.era] ?? 1.0;
+    const building = new PlayerBuilding(uuidv4(), playerId, 'wall', cells[0].x, cells[0].y, hpMult, cells);
+    this._playerBuildings.set(building.id, building);
+    this._players.set(playerId, {
+      ...player,
+      resources: player.resources.subtract(totalCost),
+    });
+
+    // O aldeão vai até a parte mais próxima do muro.
+    const builder = this._findBuilder(playerId, villagerId, cells[0].x, cells[0].y, 1, 1);
+    if (builder) {
+      const near = this._nearestCell(cells, builder.x, builder.y);
+      const dest = this._adjacentTile(near.x, near.y, 1, 1);
+      if (dest) builder.commandConstruct(building.id, dest.x, dest.y);
+    }
+  }
+
+  /**
+   * Converte um arrasto (início→fim) em uma linha reta de tiles numa das 8 direções
+   * isométricas. Linhas fora desses eixos são encaixadas no eixo mais próximo —
+   * para outros formatos o jogador quebra em vários muros.
+   */
+  private _wallCells(startX: number, startY: number, endX: number, endY: number): { x: number; y: number }[] {
+    const MAX_SEGMENTS = 25; // limite de segurança para um único muro
+    const dxRaw = endX - startX;
+    const dyRaw = endY - startY;
+    const adx = Math.abs(dxRaw);
+    const ady = Math.abs(dyRaw);
+    if (adx === 0 && ady === 0) return [{ x: startX, y: startY }];
+
+    const sx = Math.sign(dxRaw);
+    const sy = Math.sign(dyRaw);
+    let stepX: number, stepY: number, length: number;
+    if (ady * 2 <= adx)      { stepX = sx; stepY = 0;  length = adx + 1; }       // horizontal
+    else if (adx * 2 <= ady) { stepX = 0;  stepY = sy; length = ady + 1; }       // vertical
+    else                     { stepX = sx; stepY = sy; length = Math.max(adx, ady) + 1; } // diagonal
+
+    length = Math.min(length, MAX_SEGMENTS);
+    const cells: { x: number; y: number }[] = [];
+    for (let k = 0; k < length; k++) cells.push({ x: startX + k * stepX, y: startY + k * stepY });
+    return cells;
+  }
+
+  /**
+   * Constrói um Portão sobre um segmento de muro existente do jogador. O Portão
+   * ocupa o mesmo tile do muro e cria uma passagem que só as tropas do dono
+   * atravessam. Falha se não houver muro do jogador no local.
+   */
+  placeGate(playerId: string, x: number, y: number, villagerId?: string): void {
+    const player = this._players.get(playerId);
+    if (!player) throw new Error('Jogador não encontrado');
+
+    if (!this._wallOwnedAt(playerId, x, y)) {
+      throw new Error('O Portão só pode ser construído sobre um muro');
+    }
+    if (this._gateAt(x, y)) throw new Error('Já existe um Portão neste local');
+
+    const config = BUILDING_CONFIGS.gate;
+    if (!player.resources.canAfford(config.cost)) {
+      throw new Error(`Recursos insuficientes para construir ${config.label}`);
+    }
+
+    const hpMult = ERA_HP_MULT[player.era] ?? 1.0;
+    const gate = new PlayerBuilding(uuidv4(), playerId, 'gate', x, y, hpMult);
+    this._playerBuildings.set(gate.id, gate);
+    this._players.set(playerId, {
+      ...player,
+      resources: player.resources.subtract(config.cost),
+    });
+
+    const builder = this._findBuilder(playerId, villagerId, x, y, 1, 1);
+    if (builder) {
+      const dest = this._adjacentTile(x, y, 1, 1);
+      if (dest) builder.commandConstruct(gate.id, dest.x, dest.y);
+    }
+  }
+
+  private _nearestCell(cells: { x: number; y: number }[], x: number, y: number): { x: number; y: number } {
+    let best = cells[0];
+    let bestD = Infinity;
+    for (const c of cells) {
+      const d = Math.abs(c.x - x) + Math.abs(c.y - y);
+      if (d < bestD) { bestD = d; best = c; }
+    }
+    return best;
+  }
+
   advanceTick(): void {
     this._tick++;
 
-    const isTileBlocked = (x: number, y: number) =>
-      !this._isTileWalkable(x, y) || this._isTileBlockedByCompleteBuilding(x, y);
+    // Bloqueio sensível ao dono: um Portão aliado abre passagem para as tropas do
+    // seu dono, mas continua sendo barreira para inimigos.
+    const isBlockedFor = (ownerId: string, x: number, y: number) =>
+      !this._isTileWalkable(x, y) || this._isTileBlockedByCompleteBuildingFor(ownerId, x, y);
 
     // ── Movement (fractional tiles per tick — handled inside stepTowardTarget) ─
     for (const villager of this._villagers.values()) {
       if (villager.state !== 'moving') continue;
-      villager.stepTowardTarget(isTileBlocked);
+      villager.stepTowardTarget((x, y) => isBlockedFor(villager.ownerId, x, y));
     }
 
     // ── Construction ─────────────────────────────────────────────────────────
@@ -285,15 +408,16 @@ export class GameSession {
         for (let step = 0; step < cfg.moveSpeedTiles; step++) {
           const dx = Math.sign(targetPos.x - attacker.x);
           const dy = Math.sign(targetPos.y - attacker.y);
+          const blocked = (x: number, y: number) => isBlockedFor(attacker.ownerId, x, y);
           const diagOk = dx !== 0 && dy !== 0
-            && !isTileBlocked(attacker.x + dx, attacker.y + dy)
-            && !isTileBlocked(attacker.x + dx, attacker.y)
-            && !isTileBlocked(attacker.x, attacker.y + dy);
+            && !blocked(attacker.x + dx, attacker.y + dy)
+            && !blocked(attacker.x + dx, attacker.y)
+            && !blocked(attacker.x, attacker.y + dy);
           if (diagOk) {
             attacker.nudge(dx, dy);
-          } else if (dx !== 0 && !isTileBlocked(attacker.x + dx, attacker.y)) {
+          } else if (dx !== 0 && !blocked(attacker.x + dx, attacker.y)) {
             attacker.nudge(dx, 0);
-          } else if (dy !== 0 && !isTileBlocked(attacker.x, attacker.y + dy)) {
+          } else if (dy !== 0 && !blocked(attacker.x, attacker.y + dy)) {
             attacker.nudge(0, dy);
           } else {
             break;
@@ -426,6 +550,40 @@ export class GameSession {
       }
     }
     return false;
+  }
+
+  /**
+   * Como _isTileBlockedByCompleteBuilding, mas um Portão concluído do próprio dono
+   * abre passagem para suas tropas (retorna não-bloqueado). Para inimigos o tile
+   * continua sendo barreira (muro e/ou portão).
+   */
+  private _isTileBlockedByCompleteBuildingFor(ownerId: string, x: number, y: number): boolean {
+    if (this._hasFriendlyCompleteGate(ownerId, x, y)) return false;
+    return this._isTileBlockedByCompleteBuilding(x, y);
+  }
+
+  private _hasFriendlyCompleteGate(ownerId: string, x: number, y: number): boolean {
+    for (const b of this._playerBuildings.values()) {
+      if (b.type !== 'gate' || !b.isComplete || b.ownerId !== ownerId) continue;
+      for (const t of b.occupiedTiles) if (t.x === x && t.y === y) return true;
+    }
+    return false;
+  }
+
+  private _wallOwnedAt(playerId: string, x: number, y: number): PlayerBuilding | null {
+    for (const b of this._playerBuildings.values()) {
+      if (b.type !== 'wall' || b.ownerId !== playerId) continue;
+      for (const t of b.occupiedTiles) if (t.x === x && t.y === y) return b;
+    }
+    return null;
+  }
+
+  private _gateAt(x: number, y: number): PlayerBuilding | null {
+    for (const b of this._playerBuildings.values()) {
+      if (b.type !== 'gate') continue;
+      for (const t of b.occupiedTiles) if (t.x === x && t.y === y) return b;
+    }
+    return null;
   }
 
   private _getTargetOwner(targetId: string, kind: AttackTargetKind): string | null {

@@ -10,6 +10,8 @@ import { GatherResourceUseCase } from './core/application/use-cases/GatherResour
 import { TrainVillagerUseCase } from './core/application/use-cases/TrainVillagerUseCase';
 import { PlaceBuildingUseCase } from './core/application/use-cases/PlaceBuildingUseCase';
 import { ConstructBuildingUseCase } from './core/application/use-cases/ConstructBuildingUseCase';
+import { PlaceWallUseCase } from './core/application/use-cases/PlaceWallUseCase';
+import { PlaceGateUseCase } from './core/application/use-cases/PlaceGateUseCase';
 import { AdvanceEraUseCase } from './core/application/use-cases/AdvanceEraUseCase';
 import { GameLoopService } from './core/application/services/GameLoopService';
 
@@ -33,6 +35,8 @@ const gatherResourceUseCase = new GatherResourceUseCase(sessionRepository);
 const trainVillagerUseCase = new TrainVillagerUseCase(sessionRepository);
 const placeBuildingUseCase = new PlaceBuildingUseCase(sessionRepository);
 const constructBuildingUseCase = new ConstructBuildingUseCase(sessionRepository);
+const placeWallUseCase = new PlaceWallUseCase(sessionRepository);
+const placeGateUseCase = new PlaceGateUseCase(sessionRepository);
 const advanceEraUseCase = new AdvanceEraUseCase(sessionRepository);
 
 // --- Input adapters ---
@@ -44,6 +48,8 @@ const wsAdapter = new WebSocketAdapter(
   trainVillagerUseCase,
   placeBuildingUseCase,
   constructBuildingUseCase,
+  placeWallUseCase,
+  placeGateUseCase,
   advanceEraUseCase,
   sessionRepository,
   clientRegistry,

@@ -32,6 +32,7 @@ const VISION_WATCHTOWER  = 8;   // tiles
 // Client-side building definitions (mirrors server BUILDING_CONFIGS)
 const BUILDING_DEFS = {
   wall:         { label:'Muro',           width:1, height:1, cost:{stone:2},           color:'#8a7060' },
+  gate:         { label:'Portão',         width:1, height:1, cost:{wood:10,stone:5},   color:'#7a5a30' },
   watchtower:   { label:'Torre de Vigia', width:1, height:1, cost:{stone:20,wood:10},   color:'#b09070' },
   lumber_camp:  { label:'Serraria',       width:2, height:2, cost:{wood:30,stone:5},    color:'#5a7030' },
   gold_mine:    { label:'Mina de Ouro',   width:2, height:2, cost:{stone:40,wood:20},   color:'#c09020' },
@@ -195,6 +196,7 @@ const G = {
 
   // Building placement
   placingBuildingType: null,  // string key from BUILDING_DEFS, or null
+  wallStart: null,            // { tx, ty } — first tile of a wall drag, or null
   ghostTile: null,            // { tx, ty } — current cursor tile
 
   // Drag-select state (canvas-pixel coords)
@@ -915,6 +917,14 @@ function renderEntitiesSorted(snapshot) {
 
   for (const b of snapshot.playerBuildings ?? []) {
     const isOwn = b.ownerId === G.playerId;
+    if (b.cells) {
+      // Continuous wall: visible if any segment is revealed/in view; depth by middle segment.
+      if (!isOwn && !b.cells.some(c => isTileRevealed(c.x, c.y))) continue;
+      if (!b.cells.some(c => isTileInView(c.x, c.y, TILE_W * 2))) continue;
+      const mid = b.cells[Math.floor(b.cells.length / 2)];
+      list.push({ kind: 'building', payload: b, depth: mid.x + mid.y });
+      continue;
+    }
     if (!isOwn && !isTileRevealed(b.x, b.y)) continue;
     if (!isTileInView(b.x + (b.width - 1) / 2, b.y + (b.height - 1) / 2, TILE_W * 2)) continue;
     list.push({ kind: 'building', payload: b, depth: b.x + (b.width - 1) + b.y + (b.height - 1) });
@@ -1359,9 +1369,76 @@ function drawBuildingSheet(sheet, b, frameIdx, meta) {
   return { sx: cx, sy: dy + drawH * 0.05 };
 }
 
+// Draw a continuous wall (a single building covering several tiles in a line).
+// Each cell is rendered as a 1×1 wall sprite; a single HP/progress bar is shown
+// near the middle segment.
+function renderWallChain(snapshot, b) {
+  const ctx = G.ctx;
+  const cells = b.cells;
+  const material = b.material === 'stone' ? 'stone' : 'wood';
+  const sprite = G.buildingSprites?.[`wall_${material}`];
+
+  // Draw back-to-front (painter's order) using the same iso depth as the main pass.
+  const ordered = [...cells].sort((a, c) => (a.x + a.y) - (c.x + c.y));
+  for (const cell of ordered) {
+    // A gate visually replaces the wall segment it sits on (rendered separately).
+    if (gateTileAt(cell.x, cell.y)) continue;
+    const ground = worldToScreen(cell.x + 0.5, cell.y + 0.5);
+    const cx = ground.sx;
+    const cy = ground.sy + TILE_H / 2;
+    if (sprite) {
+      const drawW = TILE_W * 1.7;
+      const drawH = drawW;
+      const dx = cx - drawW / 2;
+      const dy = cy - drawH * 0.70;
+      if (b.status === 'under_construction') ctx.globalAlpha = 0.55;
+      ctx.drawImage(sprite, dx, dy, drawW, drawH);
+      ctx.globalAlpha = 1;
+    } else {
+      draw3DBox(cell.x, cell.y, 1, 1, 50, {
+        wallRight: '#9a8878', wallLeft: '#6a5848', roof: '#aaa090',
+        outline: 'rgba(40,28,16,0.7)',
+      });
+      if (b.status === 'under_construction') {
+        const t = worldToScreen(cell.x, cell.y), r = worldToScreen(cell.x + 1, cell.y);
+        const bo = worldToScreen(cell.x + 1, cell.y + 1), l = worldToScreen(cell.x, cell.y + 1);
+        ctx.beginPath();
+        ctx.moveTo(t.sx, t.sy); ctx.lineTo(r.sx, r.sy); ctx.lineTo(bo.sx, bo.sy); ctx.lineTo(l.sx, l.sy);
+        ctx.closePath();
+        ctx.fillStyle = 'rgba(0,0,0,0.4)';
+        ctx.fill();
+      }
+    }
+  }
+
+  // Single status bar at the middle segment.
+  const mid = cells[Math.floor(cells.length / 2)];
+  const anchor = worldToScreen(mid.x + 0.5, mid.y + 0.5);
+  if (b.status === 'under_construction') {
+    const pct = 1 - (b.constructionTicksRemaining / b.constructionTotalTicks);
+    const barW = TILE_W * 0.8;
+    const barX = anchor.sx - barW / 2;
+    const barY = anchor.sy + TILE_H / 2 + 4;
+    ctx.fillStyle = 'rgba(0,0,0,0.7)';
+    ctx.fillRect(barX, barY, barW, 5);
+    ctx.fillStyle = pct < 0.5 ? '#d08020' : '#60c040';
+    ctx.fillRect(barX, barY, Math.round(barW * pct), 5);
+  } else if (b.hp < b.maxHp) {
+    const pct = b.hp / b.maxHp;
+    const barW = TILE_W * 0.8;
+    const barX = anchor.sx - barW / 2;
+    const barY = anchor.sy - 12;
+    ctx.fillStyle = 'rgba(0,0,0,0.6)';
+    ctx.fillRect(barX, barY, barW, 4);
+    ctx.fillStyle = pct > 0.5 ? '#50e040' : pct > 0.25 ? '#e0c040' : '#e04040';
+    ctx.fillRect(barX, barY, Math.round(barW * pct), 4);
+  }
+}
+
 // ── Player Building (iso 3D boxes by type) ──────────────────────────────────
 function renderPlayerBuilding(snapshot, b) {
   const ctx = G.ctx;
+  if (b.cells) { renderWallChain(snapshot, b); return; }
   const def = BUILDING_DEFS[b.type] ?? { color:'#666', width:1, height:1 };
   const w = b.width  ?? def.width;
   const h = b.height ?? def.height;
@@ -1417,6 +1494,54 @@ function renderPlayerBuilding(snapshot, b) {
         });
         topAnchor = corners.tR;
       }
+      break;
+    }
+
+    case 'gate': {
+      // Medieval gatehouse: two stone pillars flanking an open archway, matching
+      // the wall palette. The open arch reads as a passage through the wall.
+      const stoneR = '#9a8878', stoneL = '#6a5848', stoneTop = '#b0a494';
+      const pillarH = 56;
+      // Base/threshold box (low) so the gate sits flush in the wall line.
+      const base = draw3DBox(b.x, b.y, w, h, 10, {
+        wallRight: stoneL, wallLeft: '#4a3a2c', roof: '#5a4a3a', outline,
+      });
+      // Two pillars: nudge slightly toward the left/right diamond corners.
+      const cTop = base.top, cBot = base.bottom;
+      const archMidX = (cTop.sx + cBot.sx) / 2;
+      const archBaseY = (cTop.sy + cBot.sy) / 2;
+      const pillarW = TILE_W * 0.22;
+      for (const side of [-1, 1]) {
+        const px = archMidX + side * TILE_W * 0.30;
+        const py = archBaseY + Math.abs(side) * 0 + side * (TILE_H * 0.15);
+        // Pillar body
+        ctx.fillStyle = side < 0 ? stoneL : stoneR;
+        ctx.fillRect(px - pillarW / 2, py - pillarH, pillarW, pillarH);
+        ctx.strokeStyle = outline; ctx.lineWidth = 1;
+        ctx.strokeRect(px - pillarW / 2, py - pillarH, pillarW, pillarH);
+        // Crenellation cap
+        ctx.fillStyle = stoneTop;
+        ctx.fillRect(px - pillarW / 2 - 2, py - pillarH - 5, pillarW + 4, 6);
+      }
+      // Arched lintel connecting the pillars
+      ctx.strokeStyle = stoneTop; ctx.lineWidth = 5;
+      ctx.beginPath();
+      ctx.moveTo(archMidX - TILE_W * 0.30, archBaseY + TILE_H * 0.15 - pillarH + 4);
+      ctx.quadraticCurveTo(archMidX, archBaseY - pillarH - 14, archMidX + TILE_W * 0.30, archBaseY - TILE_H * 0.15 - pillarH + 4);
+      ctx.stroke();
+      // Dark passage opening under the arch (the "free passage")
+      ctx.fillStyle = 'rgba(20,12,6,0.75)';
+      ctx.beginPath();
+      ctx.moveTo(archMidX - pillarW * 0.5, archBaseY + TILE_H * 0.12);
+      ctx.lineTo(archMidX - pillarW * 0.5, archBaseY - pillarH * 0.7);
+      ctx.quadraticCurveTo(archMidX, archBaseY - pillarH * 0.95, archMidX + pillarW * 0.5, archBaseY - pillarH * 0.7);
+      ctx.lineTo(archMidX + pillarW * 0.5, archBaseY - TILE_H * 0.12);
+      ctx.closePath();
+      ctx.fill();
+      // Player banner on the arch
+      ctx.fillStyle = playerColor;
+      ctx.fillRect(archMidX - 4, archBaseY - pillarH - 10, 8, 10);
+      topAnchor = { sx: archMidX, sy: archBaseY - pillarH - 16 };
       break;
     }
 
@@ -1619,6 +1744,74 @@ function renderBuildingGhost() {
   const def = BUILDING_DEFS[G.placingBuildingType];
   if (!def) return;
 
+  // Walls preview as a continuous line snapped to one of the 8 iso directions.
+  if (G.placingBuildingType === 'wall') {
+    const start = G.wallStart ?? G.ghostTile;
+    const sTx = start.tx, sTy = start.ty;
+    const cells = wallCells(sTx, sTy, G.ghostTile.tx, G.ghostTile.ty);
+    const affordable = canAffordWall(cells.length);
+    for (const c of cells) {
+      const ok = affordable && wallCellPlaceable(c);
+      const top    = worldToScreen(c.x,     c.y);
+      const right  = worldToScreen(c.x + 1, c.y);
+      const bottom = worldToScreen(c.x + 1, c.y + 1);
+      const left   = worldToScreen(c.x,     c.y + 1);
+      ctx.beginPath();
+      ctx.moveTo(top.sx, top.sy); ctx.lineTo(right.sx, right.sy);
+      ctx.lineTo(bottom.sx, bottom.sy); ctx.lineTo(left.sx, left.sy);
+      ctx.closePath();
+      ctx.fillStyle = ok ? 'rgba(64,200,64,0.45)' : 'rgba(200,64,64,0.45)';
+      ctx.fill();
+      ctx.strokeStyle = ok ? '#80ff80' : '#ff8080';
+      ctx.lineWidth = 1.5;
+      ctx.stroke();
+    }
+    // Label: count + total cost at the last cell.
+    const last = worldToScreen(cells[cells.length - 1].x, cells[cells.length - 1].y);
+    const stone = (def.cost.stone ?? 0) * cells.length;
+    ctx.fillStyle = '#fff';
+    ctx.font = `bold ${Math.round(11 * SPRITE_SCALE)}px Georgia`;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'bottom';
+    ctx.strokeStyle = 'rgba(0,0,0,0.7)';
+    ctx.lineWidth = 3;
+    const text = `Muro ×${cells.length} (${stone} pedra)`;
+    ctx.strokeText(text, last.sx, last.sy - 4);
+    ctx.fillText(text, last.sx, last.sy - 4);
+    return;
+  }
+
+  // Gate: a single tile that must land on an existing own wall segment.
+  if (G.placingBuildingType === 'gate') {
+    const { tx, ty } = G.ghostTile;
+    const valid = canAffordBuilding('gate') && !!ownWallTileAt(tx, ty) && !gateTileAt(tx, ty);
+    const top    = worldToScreen(tx,     ty);
+    const right  = worldToScreen(tx + 1, ty);
+    const bottom = worldToScreen(tx + 1, ty + 1);
+    const left   = worldToScreen(tx,     ty + 1);
+    ctx.beginPath();
+    ctx.moveTo(top.sx, top.sy); ctx.lineTo(right.sx, right.sy);
+    ctx.lineTo(bottom.sx, bottom.sy); ctx.lineTo(left.sx, left.sy);
+    ctx.closePath();
+    ctx.fillStyle = valid ? 'rgba(64,200,64,0.45)' : 'rgba(200,64,64,0.45)';
+    ctx.fill();
+    ctx.strokeStyle = valid ? '#80ff80' : '#ff8080';
+    ctx.lineWidth = 2;
+    ctx.setLineDash([4, 3]);
+    ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.fillStyle = '#fff';
+    ctx.font = `bold ${Math.round(11 * SPRITE_SCALE)}px Georgia`;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'bottom';
+    ctx.strokeStyle = 'rgba(0,0,0,0.7)';
+    ctx.lineWidth = 3;
+    const text = valid ? 'Portão' : 'Precisa de muro';
+    ctx.strokeText(text, top.sx, top.sy - 4);
+    ctx.fillText(text, top.sx, top.sy - 4);
+    return;
+  }
+
   const { tx, ty } = G.ghostTile;
   const canAfford = canAffordBuilding(G.placingBuildingType);
   const valid = canAfford && isTileRangeWalkable(tx, ty, def.width, def.height);
@@ -1689,6 +1882,10 @@ function isTileOccupied(tx, ty) {
   if (!G.snapshot) return false;
   // All buildings (including under construction) block new placement
   for (const b of G.snapshot.playerBuildings ?? []) {
+    if (b.cells) {
+      if (b.cells.some(c => c.x === tx && c.y === ty)) return true;
+      continue;
+    }
     const bw = b.width ?? 1;
     const bh = b.height ?? 1;
     if (tx >= b.x && tx < b.x + bw && ty >= b.y && ty < b.y + bh) return true;
@@ -1708,6 +1905,49 @@ function canAffordBuilding(type) {
   const cost = BUILDING_DEFS[type]?.cost ?? {};
   for (const [res, amt] of Object.entries(cost)) {
     if ((me.resources[res] ?? 0) < amt) return false;
+  }
+  return true;
+}
+
+// Encaixa um arrasto (início→fim) numa linha reta de tiles em uma das 8 direções
+// isométricas. Espelha GameSession._wallCells no servidor — manter em sincronia.
+const MAX_WALL_SEGMENTS = 25;
+function wallCells(startX, startY, endX, endY) {
+  const dxRaw = endX - startX;
+  const dyRaw = endY - startY;
+  const adx = Math.abs(dxRaw);
+  const ady = Math.abs(dyRaw);
+  if (adx === 0 && ady === 0) return [{ x: startX, y: startY }];
+  const sx = Math.sign(dxRaw);
+  const sy = Math.sign(dyRaw);
+  let stepX, stepY, length;
+  if (ady * 2 <= adx)      { stepX = sx; stepY = 0;  length = adx + 1; }
+  else if (adx * 2 <= ady) { stepX = 0;  stepY = sy; length = ady + 1; }
+  else                     { stepX = sx; stepY = sy; length = Math.max(adx, ady) + 1; }
+  length = Math.min(length, MAX_WALL_SEGMENTS);
+  const cells = [];
+  for (let k = 0; k < length; k++) cells.push({ x: startX + k * stepX, y: startY + k * stepY });
+  return cells;
+}
+
+// Um tile de muro é colocável se for terreno andável e estiver livre de construções.
+function wallCellPlaceable(c) {
+  if (!G.mapTiles) return false;
+  const mh = G.mapTiles.length;
+  const mw = G.mapTiles[0]?.length ?? 0;
+  if (c.x < 0 || c.y < 0 || c.x >= mw || c.y >= mh) return false;
+  const tile = G.mapTiles[c.y]?.[c.x];
+  if (!tile || tile === 'water') return false;
+  return !isTileOccupied(c.x, c.y);
+}
+
+function canAffordWall(segments) {
+  if (!G.snapshot || G.myPlayerIndex < 0) return false;
+  const me = G.snapshot.players[G.myPlayerIndex];
+  if (!me) return false;
+  const cost = BUILDING_DEFS.wall.cost ?? {};
+  for (const [res, amt] of Object.entries(cost)) {
+    if ((me.resources[res] ?? 0) < amt * segments) return false;
   }
   return true;
 }
@@ -1899,9 +2139,7 @@ function enemyTargetAt(tx, ty) {
   // Enemy building
   for (const b of G.snapshot.playerBuildings ?? []) {
     if (b.ownerId === G.playerId) continue;
-    if (tx >= b.x && tx < b.x + b.width && ty >= b.y && ty < b.y + b.height) {
-      return { id: b.id, kind: 'building' };
-    }
+    if (buildingCoversTile(b, tx, ty)) return { id: b.id, kind: 'building' };
   }
   // Enemy TC
   for (const tc of G.snapshot.townCenters) {
@@ -1912,11 +2150,36 @@ function enemyTargetAt(tx, ty) {
   return null;
 }
 
+// True if the building (rectangular or a continuous wall) covers tile (tx, ty).
+function buildingCoversTile(b, tx, ty) {
+  if (b.cells) return b.cells.some(c => c.x === tx && c.y === ty);
+  const bw = b.width ?? 1, bh = b.height ?? 1;
+  return tx >= b.x && tx < b.x + bw && ty >= b.y && ty < b.y + bh;
+}
+
+// Own wall segment at tile — gates may only be built on these.
+function ownWallTileAt(tx, ty) {
+  for (const b of G.snapshot?.playerBuildings ?? []) {
+    if (b.type !== 'wall' || b.ownerId !== G.playerId || !b.cells) continue;
+    if (b.cells.some(c => c.x === tx && c.y === ty)) return b;
+  }
+  return null;
+}
+
+// Any gate covering tile (a gate occupies a single wall segment).
+function gateTileAt(tx, ty) {
+  for (const b of G.snapshot?.playerBuildings ?? []) {
+    if (b.type !== 'gate') continue;
+    if (buildingCoversTile(b, tx, ty)) return b;
+  }
+  return null;
+}
+
 // Own building still under construction at tile — used to resume interrupted builds.
 function ownUnderConstructionAt(tx, ty) {
   for (const b of G.snapshot?.playerBuildings ?? []) {
     if (b.ownerId !== G.playerId || b.status !== 'under_construction') continue;
-    if (tx >= b.x && tx < b.x + b.width && ty >= b.y && ty < b.y + b.height) return b;
+    if (buildingCoversTile(b, tx, ty)) return b;
   }
   return null;
 }
@@ -2015,7 +2278,11 @@ function setupInput() {
   // Begin drag-select on left mousedown (skip when in placement mode).
   G.canvas.addEventListener('mousedown', (e) => {
     if (e.button !== 0) return;
-    if (G.placingBuildingType) return;
+    if (G.placingBuildingType) {
+      // Walls are placed by dragging from a start tile to an end tile.
+      if (G.placingBuildingType === 'wall') G.wallStart = pixelToTile(e);
+      return;
+    }
     G.dragStart = eventToCanvasXY(e);
     G.dragCurrent = { ...G.dragStart };
     G.isDragging = false;
@@ -2024,6 +2291,22 @@ function setupInput() {
   // Finish drag-select; if it was a real drag (vs a click), pick all own units inside.
   G.canvas.addEventListener('mouseup', (e) => {
     if (e.button !== 0) return;
+
+    // Finish a wall drag: snap to a straight line and send it as one construction.
+    if (G.placingBuildingType === 'wall' && G.wallStart) {
+      const start = G.wallStart;
+      const end = pixelToTile(e);
+      G.wallStart = null;
+      const cells = wallCells(start.tx, start.ty, end.tx, end.ty);
+      if (canAffordWall(cells.length) && cells.every(wallCellPlaceable)) {
+        const villagerId = G.selectedIds.size === 1 ? [...G.selectedIds][0] : undefined;
+        send({ type: 'place_wall', startX: start.tx, startY: start.ty, endX: end.tx, endY: end.ty, villagerId });
+        if (!e.shiftKey) cancelPlacingMode();
+      }
+      G.swallowNextClick = true; // suppress the click event that follows this mouseup
+      return;
+    }
+
     if (!G.dragStart) return;
     const wasDragging = G.isDragging;
     if (wasDragging) {
@@ -2054,6 +2337,17 @@ function setupInput() {
 
     // Building placement mode
     if (G.placingBuildingType) {
+      if (G.placingBuildingType === 'wall') return; // walls handled via drag (mousedown/mouseup)
+      if (G.placingBuildingType === 'gate') {
+        // Gates are placed onto an existing own wall segment.
+        if (!ownWallTileAt(tx, ty)) { setHudStatus('⚠ O Portão só pode ser construído sobre um muro'); return; }
+        if (gateTileAt(tx, ty))     { setHudStatus('⚠ Já existe um Portão neste local'); return; }
+        if (!canAffordBuilding('gate')) { setHudStatus('⚠ Recursos insuficientes para construir o Portão'); return; }
+        const villagerId = G.selectedIds.size === 1 ? [...G.selectedIds][0] : undefined;
+        send({ type: 'place_gate', x: tx, y: ty, villagerId });
+        if (!e.shiftKey) cancelPlacingMode();
+        return;
+      }
       const def = BUILDING_DEFS[G.placingBuildingType];
       if (def && isTileRangeWalkable(tx, ty, def.width, def.height) && canAffordBuilding(G.placingBuildingType)) {
         // Send selected villager so server assigns them to construct
@@ -2148,6 +2442,7 @@ function setupInput() {
 
 function cancelPlacingMode() {
   G.placingBuildingType = null;
+  G.wallStart = null;
   G.canvas.style.cursor = 'default';
   document.querySelectorAll('.build-btn').forEach(b => b.classList.remove('selected'));
 }
@@ -2398,9 +2693,15 @@ function renderMinimap() {
   // 4. Player buildings
   if (G.snapshot) {
     for (const b of G.snapshot.playerBuildings ?? []) {
-      if (!isTileRevealed(b.x, b.y)) continue;
       const def = BUILDING_DEFS[b.type];
       if (!def) continue;
+      if (b.cells) {
+        for (const c of b.cells) {
+          if (isTileRevealed(c.x, c.y)) drawIsoFootprint(c.x, c.y, 1, 1, def.color);
+        }
+        continue;
+      }
+      if (!isTileRevealed(b.x, b.y)) continue;
       drawIsoFootprint(b.x, b.y, def.width, def.height, def.color);
     }
   }
