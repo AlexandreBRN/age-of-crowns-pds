@@ -75,6 +75,10 @@ export class Villager {
   private _constructTargetId: string | null = null;
   private _attackTargetId: string | null = null;
   private _attackTargetKind: AttackTargetKind | null = null;
+  // Alvo final ordenado pelo jogador. O alvo "atual" acima pode passar a ser um
+  // obstáculo (muro/portão) no caminho; o final é retomado quando o obstáculo cai.
+  private _attackGoalId: string | null = null;
+  private _attackGoalKind: AttackTargetKind | null = null;
   private _attackTickCounter = 0;
   private _attackInRange = false; // true só quando o alvo está dentro do alcance de ataque
   private _dyingTickCounter = 0; // ticks spent in 'dying' state after hp <= 0
@@ -110,6 +114,8 @@ export class Villager {
   get constructTargetId(): string | null { return this._constructTargetId; }
   get attackTargetId(): string | null { return this._attackTargetId; }
   get attackTargetKind(): AttackTargetKind | null { return this._attackTargetKind; }
+  get attackGoalId(): string | null { return this._attackGoalId; }
+  get attackGoalKind(): AttackTargetKind | null { return this._attackGoalKind; }
   get attackTickCounter(): number { return this._attackTickCounter; }
   get gatherTickCounter(): number { return this._gatherTickCounter; }
   get attackInRange(): boolean { return this._attackInRange; }
@@ -163,6 +169,8 @@ export class Villager {
     if (this.config.attackDamage === 0) return; // villagers cannot attack
     this._attackTargetId = targetId;
     this._attackTargetKind = targetKind;
+    this._attackGoalId = targetId;     // alvo final ordenado pelo jogador
+    this._attackGoalKind = targetKind;
     this._gatherTargetId = null;
     this._constructTargetId = null;
     this._moveTargetX = null;
@@ -171,6 +179,22 @@ export class Villager {
     this._attackTickCounter = 0;
     this._attackInRange = false; // começa se aproximando até a fase de combate confirmar alcance
     this._state = 'attacking';
+  }
+
+  /** Redireciona o ataque para um obstáculo no caminho, preservando o alvo final. */
+  redirectAttackTo(targetId: string, targetKind: AttackTargetKind): void {
+    this._attackTargetId = targetId;
+    this._attackTargetKind = targetKind;
+    this._attackTickCounter = 0;
+    this._attackInRange = false;
+  }
+
+  /** Volta a mirar o alvo final ordenado (após derrubar um obstáculo). */
+  revertAttackToGoal(): void {
+    this._attackTargetId = this._attackGoalId;
+    this._attackTargetKind = this._attackGoalKind;
+    this._attackTickCounter = 0;
+    this._attackInRange = false;
   }
 
   commandIdle(): void {
@@ -184,6 +208,8 @@ export class Villager {
     this._constructTargetId = null;
     this._attackTargetId = null;
     this._attackTargetKind = null;
+    this._attackGoalId = null;
+    this._attackGoalKind = null;
     this._gatherTickCounter = 0;
     this._attackTickCounter = 0;
   }
@@ -205,6 +231,8 @@ export class Villager {
     this._constructTargetId = null;
     this._attackTargetId = null;
     this._attackTargetKind = null;
+    this._attackGoalId = null;
+    this._attackGoalKind = null;
   }
 
   tickDying(): void { this._dyingTickCounter++; }

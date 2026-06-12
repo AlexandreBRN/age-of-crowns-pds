@@ -157,6 +157,12 @@ export class PlayerBuilding {
     this._hp = Math.max(0, this._hp - amount);
   }
 
+  /** Conclui a construção imediatamente — usado ao dividir uma muralha em segmentos. */
+  markComplete(): void {
+    this._constructionTicksRemaining = 0;
+    this._status = 'complete';
+  }
+
   /** Decrement construction counter. Returns true when construction just completed. */
   tickConstruction(): boolean {
     if (this._status === 'complete') return false;

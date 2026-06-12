@@ -7,6 +7,7 @@ import { VillagerId } from '../value-objects/VillagerId';
 import { Resources } from '../value-objects/Resources';
 import { TileType, TILE_WALKABLE } from '../value-objects/TileType';
 import { GameStateSnapshot } from '../types/GameStateSnapshot';
+import { findPath } from '../services/Pathfinder';
 
 export interface PlayerData {
   id: string;
@@ -322,15 +323,18 @@ export class GameSession {
     const player = this._players.get(playerId);
     if (!player) throw new Error('Jogador não encontrado');
 
-    if (!this._wallOwnedAt(playerId, x, y)) {
-      throw new Error('O Portão só pode ser construído sobre um muro');
-    }
+    const wall = this._wallOwnedAt(playerId, x, y);
+    if (!wall) throw new Error('O Portão só pode ser construído sobre um muro');
+    if (!wall.isComplete) throw new Error('O Portão só pode ser construído sobre um muro concluído');
     if (this._gateAt(x, y)) throw new Error('Já existe um Portão neste local');
 
     const config = BUILDING_CONFIGS.gate;
     if (!player.resources.canAfford(config.cost)) {
       throw new Error(`Recursos insuficientes para construir ${config.label}`);
     }
+
+    // O Portão substitui o segmento de muro: remove o segmento e ocupa o tile.
+    this._playerBuildings.delete(wall.id);
 
     const hpMult = ERA_HP_MULT[player.era] ?? 1.0;
     const gate = new PlayerBuilding(uuidv4(), playerId, 'gate', x, y, hpMult);
@@ -345,6 +349,21 @@ export class GameSession {
       const dest = this._adjacentTile(x, y, 1, 1);
       if (dest) builder.commandConstruct(gate.id, dest.x, dest.y);
     }
+  }
+
+  /**
+   * Substitui a muralha-grupo concluída por um prédio de muro independente por
+   * tile (1×1, já concluído). A partir daí cada segmento tem vida própria e é
+   * destruído isoladamente, abrindo brechas sem afetar os vizinhos.
+   */
+  private _splitWallIntoSegments(group: PlayerBuilding): void {
+    const hpMult = ERA_HP_MULT[this._players.get(group.ownerId)?.era ?? 1] ?? 1.0;
+    for (const cell of group.occupiedTiles) {
+      const seg = new PlayerBuilding(uuidv4(), group.ownerId, 'wall', cell.x, cell.y, hpMult);
+      seg.markComplete();
+      this._playerBuildings.set(seg.id, seg);
+    }
+    this._playerBuildings.delete(group.id);
   }
 
   private _nearestCell(cells: { x: number; y: number }[], x: number, y: number): { x: number; y: number } {
@@ -377,7 +396,14 @@ export class GameSession {
       const building = this._playerBuildings.get(villager.constructTargetId);
       if (!building || building.isComplete) { villager.setIdle(); continue; }
       building.tickConstruction();
-      if (building.isComplete) villager.setIdle();
+      if (building.isComplete) {
+        // Uma muralha é construída como um todo contínuo, mas ao concluir vira
+        // segmentos independentes (cada um com sua própria vida) para fins de combate.
+        if (building.type === 'wall' && building.occupiedTiles.length > 1) {
+          this._splitWallIntoSegments(building);
+        }
+        villager.setIdle();
+      }
     }
 
     // ── Combat ───────────────────────────────────────────────────────────────
@@ -385,8 +411,18 @@ export class GameSession {
       if (attacker.state !== 'attacking' || !attacker.attackTargetId) continue;
       const cfg = attacker.config;
 
-      const targetPos = this._getTargetCenter(attacker.attackTargetId, attacker.attackTargetKind!);
-      if (!targetPos) { attacker.setIdle(); continue; } // target gone
+      let curId = attacker.attackTargetId;
+      let curKind = attacker.attackTargetKind!;
+      let targetPos = this._getTargetCenter(curId, curKind);
+
+      // Alvo atual sumiu — se era apenas um obstáculo, volta a mirar o alvo final.
+      if (!targetPos && attacker.attackGoalId && curId !== attacker.attackGoalId) {
+        attacker.revertAttackToGoal();
+        curId = attacker.attackTargetId!;
+        curKind = attacker.attackTargetKind!;
+        targetPos = this._getTargetCenter(curId, curKind);
+      }
+      if (!targetPos) { attacker.setIdle(); continue; } // alvo final também sumiu
 
       const dist = Math.max(
         Math.abs(attacker.x - targetPos.x),
@@ -400,29 +436,38 @@ export class GameSession {
         // In range: deal damage on cooldown
         attacker.incrementAttackCounter();
         if (attacker.attackTickCounter >= cfg.attackCooldownTicks) {
-          this._applyDamage(attacker.attackTargetId, attacker.attackTargetKind!, cfg.attackDamage);
+          this._applyDamage(curId, curKind, cfg.attackDamage);
           attacker.resetAttackCounter();
         }
+        continue;
+      }
+
+      // Fora de alcance: procurar uma rota até o alvo, desviando de obstáculos.
+      // O tile do próprio alvo é tratado como livre para que o A* chegue até ele.
+      const ax = Math.round(attacker.x);
+      const ay = Math.round(attacker.y);
+      const targetTiles = this._targetTiles(curId, curKind);
+      const blockedForPath = (x: number, y: number) =>
+        targetTiles.has(this._tileKey(x, y)) ? false : isBlockedFor(attacker.ownerId, x, y);
+
+      const path = findPath(ax, ay, Math.round(targetPos.x), Math.round(targetPos.y), blockedForPath);
+      if (path.length > 0) {
+        // Avança suavemente em direção ao próximo tile da rota.
+        const next = path[0];
+        const ddx = next.x - attacker.x;
+        const ddy = next.y - attacker.y;
+        const d = Math.hypot(ddx, ddy) || 1;
+        const speed = cfg.moveSpeedTiles;
+        if (d <= speed) attacker.nudge(ddx, ddy);
+        else attacker.nudge((ddx / d) * speed, (ddy / d) * speed);
       } else {
-        // Out of range: move toward target with greedy 8-directional step.
-        for (let step = 0; step < cfg.moveSpeedTiles; step++) {
-          const dx = Math.sign(targetPos.x - attacker.x);
-          const dy = Math.sign(targetPos.y - attacker.y);
-          const blocked = (x: number, y: number) => isBlockedFor(attacker.ownerId, x, y);
-          const diagOk = dx !== 0 && dy !== 0
-            && !blocked(attacker.x + dx, attacker.y + dy)
-            && !blocked(attacker.x + dx, attacker.y)
-            && !blocked(attacker.x, attacker.y + dy);
-          if (diagOk) {
-            attacker.nudge(dx, dy);
-          } else if (dx !== 0 && !blocked(attacker.x + dx, attacker.y)) {
-            attacker.nudge(dx, 0);
-          } else if (dy !== 0 && !blocked(attacker.x, attacker.y + dy)) {
-            attacker.nudge(0, dy);
-          } else {
-            break;
-          }
+        // Alvo inacessível: identificar a estrutura destrutível que bloqueia o
+        // caminho e passar a atacá-la automaticamente.
+        const obstacle = this._findBlockingObstacle(ax, ay, targetPos, attacker.ownerId);
+        if (obstacle && obstacle.id !== curId) {
+          attacker.redirectAttackTo(obstacle.id, 'building');
         }
+        // Sem obstáculo destrutível alcançável: a unidade aguarda.
       }
     }
 
@@ -560,6 +605,75 @@ export class GameSession {
   private _isTileBlockedByCompleteBuildingFor(ownerId: string, x: number, y: number): boolean {
     if (this._hasFriendlyCompleteGate(ownerId, x, y)) return false;
     return this._isTileBlockedByCompleteBuilding(x, y);
+  }
+
+  private _tileKey(x: number, y: number): number { return x * 100_000 + y; }
+
+  /** Tiles ocupados por um alvo (unidade, construção ou centro de cidade). */
+  private _targetTiles(id: string, kind: AttackTargetKind): Set<number> {
+    const set = new Set<number>();
+    if (kind === 'unit') {
+      const v = this._villagers.get(id);
+      if (v) set.add(this._tileKey(Math.round(v.x), Math.round(v.y)));
+    } else if (kind === 'building') {
+      const b = this._playerBuildings.get(id);
+      if (b) for (const t of b.occupiedTiles) set.add(this._tileKey(t.x, t.y));
+    } else {
+      const tc = this._townCenters.get(id);
+      if (tc) for (const t of tc.occupiedTiles) set.add(this._tileKey(t.x, t.y));
+    }
+    return set;
+  }
+
+  private _completeBuildingAt(x: number, y: number): PlayerBuilding | null {
+    for (const b of this._playerBuildings.values()) {
+      if (!b.isComplete) continue;
+      for (const t of b.occupiedTiles) if (t.x === x && t.y === y) return b;
+    }
+    return null;
+  }
+
+  /**
+   * A partir da posição da unidade, faz uma busca em largura pelas casas
+   * alcançáveis e devolve a estrutura destrutível inimiga (muro/portão/prédio)
+   * que faz fronteira com essa área e está mais próxima do alvo — ou seja, o
+   * obstáculo a derrubar para abrir caminho.
+   */
+  private _findBlockingObstacle(
+    sx: number, sy: number,
+    targetPos: { x: number; y: number },
+    ownerId: string,
+  ): PlayerBuilding | null {
+    const blocked = (x: number, y: number) =>
+      !this._isTileWalkable(x, y) || this._isTileBlockedByCompleteBuildingFor(ownerId, x, y);
+    const dirs = [[1, 0], [-1, 0], [0, 1], [0, -1], [1, 1], [1, -1], [-1, 1], [-1, -1]];
+    const visited = new Set<number>([this._tileKey(sx, sy)]);
+    const queue: { x: number; y: number }[] = [{ x: sx, y: sy }];
+    let best: PlayerBuilding | null = null;
+    let bestD = Infinity;
+    let iter = 0;
+
+    while (queue.length > 0 && iter++ < 8000) {
+      const cur = queue.shift()!;
+      for (const [dx, dy] of dirs) {
+        // Sem corte de quina nas diagonais (consistente com o A*).
+        if (dx !== 0 && dy !== 0 && (blocked(cur.x + dx, cur.y) || blocked(cur.x, cur.y + dy))) continue;
+        const nx = cur.x + dx, ny = cur.y + dy;
+        const key = this._tileKey(nx, ny);
+        if (visited.has(key)) continue;
+        visited.add(key);
+        if (blocked(nx, ny)) {
+          const b = this._completeBuildingAt(nx, ny);
+          if (b && b.ownerId !== ownerId) {
+            const d = Math.max(Math.abs(nx - targetPos.x), Math.abs(ny - targetPos.y));
+            if (d < bestD) { bestD = d; best = b; }
+          }
+          continue; // não atravessa casa bloqueada
+        }
+        queue.push({ x: nx, y: ny });
+      }
+    }
+    return best;
   }
 
   private _hasFriendlyCompleteGate(ownerId: string, x: number, y: number): boolean {

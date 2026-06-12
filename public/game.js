@@ -196,6 +196,7 @@ const G = {
 
   // Building placement
   placingBuildingType: null,  // string key from BUILDING_DEFS, or null
+  selectedBuildingId: null,   // id of an own building selected for inspection (HP bar), or null
   wallStart: null,            // { tx, ty } — first tile of a wall drag, or null
   ghostTile: null,            // { tx, ty } — current cursor tile
 
@@ -1684,8 +1685,17 @@ function renderPlayerBuilding(snapshot, b) {
     }
   }
 
-  // HP bar — above the topmost rendered point
-  if (b.status === 'complete' && b.hp < b.maxHp && topAnchor) {
+  // HP bar — above the topmost rendered point.
+  // Wall segments are independent structures: their HP bar shows ONLY while the
+  // segment is under attack or selected by the player. Other buildings show it
+  // whenever damaged.
+  const selected = G.selectedBuildingId === b.id;
+  const showHp = b.status === 'complete' && topAnchor && (
+    b.type === 'wall'
+      ? (isBuildingUnderAttack(b.id) || selected)
+      : (b.hp < b.maxHp || selected)
+  );
+  if (showHp) {
     const barW = TILE_W * Math.max(0.6, w * 0.5);
     const pct  = b.hp / b.maxHp;
     const barX = topAnchor.sx - barW / 2;
@@ -1694,6 +1704,10 @@ function renderPlayerBuilding(snapshot, b) {
     ctx.fillRect(barX, barY, barW, 4);
     ctx.fillStyle = pct > 0.5 ? '#50e040' : pct > 0.25 ? '#e0c040' : '#e04040';
     ctx.fillRect(barX, barY, Math.round(barW * pct), 4);
+  }
+  // Selection outline on the selected building's footprint.
+  if (selected && b.status === 'complete') {
+    outlineFootprint(b.x, b.y, w, h, '#ffe070', [4, 3]);
   }
 
   // Under-construction overlay: scaffolding + progress bar over the diamond footprint.
@@ -2157,13 +2171,30 @@ function buildingCoversTile(b, tx, ty) {
   return tx >= b.x && tx < b.x + bw && ty >= b.y && ty < b.y + bh;
 }
 
-// Own wall segment at tile — gates may only be built on these.
+// Own completed wall segment at tile — gates may only be built on these.
 function ownWallTileAt(tx, ty) {
   for (const b of G.snapshot?.playerBuildings ?? []) {
-    if (b.type !== 'wall' || b.ownerId !== G.playerId || !b.cells) continue;
-    if (b.cells.some(c => c.x === tx && c.y === ty)) return b;
+    if (b.type !== 'wall' || b.ownerId !== G.playerId || b.status !== 'complete') continue;
+    if (buildingCoversTile(b, tx, ty)) return b;
   }
   return null;
+}
+
+// Own building (any type) covering tile — used for building selection.
+function ownBuildingAt(tx, ty) {
+  for (const b of G.snapshot?.playerBuildings ?? []) {
+    if (b.ownerId !== G.playerId) continue;
+    if (buildingCoversTile(b, tx, ty)) return b;
+  }
+  return null;
+}
+
+// True if some unit is currently attacking this building (used to show its HP bar).
+function isBuildingUnderAttack(id) {
+  for (const v of G.snapshot?.villagers ?? []) {
+    if (v.attackTargetKind === 'building' && v.attackTargetId === id) return true;
+  }
+  return false;
 }
 
 // Any gate covering tile (a gate occupies a single wall segment).
@@ -2316,6 +2347,7 @@ function setupInput() {
       const right  = Math.max(a.x, b.x);
       const bottom = Math.max(a.y, b.y);
       if (!e.shiftKey) G.selectedIds.clear();
+      G.selectedBuildingId = null;
       for (const v of G.snapshot?.villagers ?? []) {
         if (v.ownerId !== G.playerId) continue;
         const p = villagerScreenXY(v);
@@ -2362,8 +2394,16 @@ function setupInput() {
     if (v) {
       if (!e.shiftKey) G.selectedIds.clear();
       G.selectedIds.add(v.id);
+      G.selectedBuildingId = null;
     } else {
-      G.selectedIds.clear();
+      const b = ownBuildingAt(tx, ty);
+      if (b) {
+        G.selectedBuildingId = b.id;   // show this segment's HP bar
+        G.selectedIds.clear();
+      } else {
+        G.selectedIds.clear();
+        G.selectedBuildingId = null;
+      }
     }
     updatePanel();
   });
