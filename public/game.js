@@ -119,6 +119,7 @@ const ANIM_DEFS = {
     attack:  makeDirSet('/assets/aldeao-novo/attack',      43),
     hammer:  makeDirSet('/assets/aldeao-novo/hammer',      29),
     gather:  makeDirSet('/assets/aldeao-novo/gather',     107),
+    throw_pull: makeDirSet('/assets/aldeao-novo/throw_pull', 88),
     dying:   makeDirSet('/assets/aldeao-novo/dying',       34),
     dead:    makeDirSet('/assets/aldeao-novo/dead',        46),
   },
@@ -517,7 +518,18 @@ function animKeyForState(v, unitSet) {
     return has('walking') ? 'walking' : Object.keys(unitSet)[0];
   }
   if (v.state === 'constructing' && has('hammer')) return 'hammer';
-  if (v.state === 'gathering'    && has('gather')) return 'gather';
+  if (v.state === 'gathering') {
+    // Caça ao cervo → animação "throw_pull" (lançar/puxar).
+    // Ouro, pedra e madeira são extraídos com ferramenta → animação "attack".
+    // Demais coletas/interações (frutas) usam "gather".
+    const node = G.snapshot?.resourceNodes?.find(n => n.id === v.gatherTarget);
+    const type = node?.type;
+    if (type === 'food_deer' && has('throw_pull')) return 'throw_pull';
+    const usesTool = type === 'gold' || type === 'stone' || type === 'wood';
+    if (usesTool && has('attack')) return 'attack';
+    if (has('gather')) return 'gather';
+    if (has('attack')) return 'attack';
+  }
   if (v.state === 'moving') {
     if (v.unitType === 'cavalry' && has('running')) return 'running';
     return 'walking';
