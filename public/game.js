@@ -2482,6 +2482,9 @@ function setupInput() {
   });
 
   document.addEventListener('keydown', (e) => {
+    // Enquanto um campo de texto (ex.: nome) está focado, as teclas são só para
+    // digitação — não movem a câmera nem acionam atalhos.
+    if (isTextInputFocused(e.target)) return;
     if (e.key === 'Escape') {
       cancelPlacingMode();
       return;
@@ -2492,7 +2495,10 @@ function setupInput() {
     }
   });
 
-  document.addEventListener('keyup', (e) => { delete G.keysHeld[e.key]; });
+  document.addEventListener('keyup', (e) => {
+    if (isTextInputFocused(e.target)) return;
+    delete G.keysHeld[e.key];
+  });
 
   document.querySelectorAll('[data-unit]').forEach(btn => {
     btn.addEventListener('click', () => {
@@ -2645,6 +2651,15 @@ function showWaiting() {
 
 function hideWaiting() {
   document.getElementById('waiting-overlay').style.display = 'none';
+}
+
+// True when the keyboard event targets an editable field (so keys mean typing,
+// not camera movement / shortcuts).
+function isTextInputFocused(target) {
+  const el = target || document.activeElement;
+  if (!el) return false;
+  const tag = el.tagName;
+  return tag === 'INPUT' || tag === 'TEXTAREA' || el.isContentEditable === true;
 }
 
 function escapeHtml(s) {
@@ -2944,6 +2959,8 @@ function setupMinimapInput() {
 
   document.getElementById('join-btn').addEventListener('click', () => {
     const name = document.getElementById('name-input').value.trim() || 'Guerreiro';
+    // Tira o foco do campo para que o WASD volte a controlar a câmera.
+    document.getElementById('name-input').blur();
     send({ type: 'join', playerName: name });
   });
 
