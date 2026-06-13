@@ -57,6 +57,11 @@ export class TownCenter {
     this._hp = Math.max(0, this._hp - amount);
   }
 
+  /** Recupera totalmente a vida — única forma de curar a Torre Principal (avanço de era). */
+  restoreFullHp(): void {
+    this._hp = TOWN_CENTER_MAX_HP;
+  }
+
   toJSON() {
     return {
       id: this._id,

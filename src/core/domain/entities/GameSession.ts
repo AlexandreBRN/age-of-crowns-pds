@@ -130,6 +130,11 @@ export class GameSession {
       era: player.era + 1,
       resources: player.resources.subtract(cost),
     });
+
+    // Avançar de era recupera totalmente a vida da Torre Principal (única forma de curá-la).
+    for (const tc of this._townCenters.values()) {
+      if (tc.ownerId === playerId) { tc.restoreFullHp(); break; }
+    }
   }
 
   removePlayer(playerId: string): void {
@@ -174,7 +179,8 @@ export class GameSession {
     const building = this._playerBuildings.get(buildingId);
     if (!building) throw new Error('Construção não encontrada');
     if (building.ownerId !== villager.ownerId) throw new Error('Construção não pertence a você');
-    if (building.isComplete) throw new Error('Construção já concluída');
+    // Concluída e com vida cheia: nada a fazer. Se estiver danificada, é um reparo.
+    if (building.isComplete && !building.needsRepair) throw new Error('Construção já concluída');
     // Muro: o aldeão vai até o segmento mais próximo. Demais construções: adjacente à área.
     let dest: { x: number; y: number } | null;
     if (building.type === 'wall') {
@@ -415,14 +421,22 @@ export class GameSession {
       villager.stepTowardTarget((x, y) => isBlockedFor(villager.ownerId, x, y));
     }
 
-    // ── Construction ─────────────────────────────────────────────────────────
+    // ── Construction / Repair ─────────────────────────────────────────────────
+    // A mesma ordem ("constructing") ergue uma construção inacabada ou repara uma
+    // já concluída e danificada — em ambos o aldeão martela (animação "hammer").
     for (const villager of this._villagers.values()) {
       if (villager.state !== 'constructing' || !villager.constructTargetId) continue;
       const building = this._playerBuildings.get(villager.constructTargetId);
-      if (!building || building.isComplete) { this._advanceConstructQueue(villager); continue; }
-      building.tickConstruction();
-      // Segmento concluído: segue para o próximo da fila (muralha peça por peça).
-      if (building.isComplete) this._advanceConstructQueue(villager);
+      if (!building) { this._advanceConstructQueue(villager); continue; }
+      if (!building.isComplete) {
+        building.tickConstruction();
+        // Segmento concluído: segue para o próximo da fila (muralha peça por peça).
+        if (building.isComplete) this._advanceConstructQueue(villager);
+      } else if (building.needsRepair) {
+        if (building.repair(building.repairPerTick)) this._advanceConstructQueue(villager);
+      } else {
+        this._advanceConstructQueue(villager);
+      }
     }
 
     // ── Combat ───────────────────────────────────────────────────────────────

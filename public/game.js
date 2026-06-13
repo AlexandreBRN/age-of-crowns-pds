@@ -2243,10 +2243,15 @@ function gateTileAt(tx, ty) {
   return null;
 }
 
-// Own building still under construction at tile — used to resume interrupted builds.
-function ownUnderConstructionAt(tx, ty) {
+// Own building at tile that a villager can work on: either still under
+// construction (resume) or already built but damaged (repair). A Torre Principal
+// não é um playerBuilding, então fica naturalmente fora (só recupera via era).
+function ownConstructTargetAt(tx, ty) {
   for (const b of G.snapshot?.playerBuildings ?? []) {
-    if (b.ownerId !== G.playerId || b.status !== 'under_construction') continue;
+    if (b.ownerId !== G.playerId) continue;
+    const unfinished = b.status !== 'complete';
+    const damaged = b.status === 'complete' && b.hp < b.maxHp;
+    if (!unfinished && !damaged) continue;
     if (buildingCoversTile(b, tx, ty)) return b;
   }
   return null;
@@ -2467,8 +2472,8 @@ function setupInput() {
       return;
     }
 
-    // Resume an own unfinished building — only villagers can build.
-    const buildSite = ownUnderConstructionAt(tx, ty);
+    // Build an unfinished building or repair a damaged one — só aldeões.
+    const buildSite = ownConstructTargetAt(tx, ty);
     if (buildSite) {
       for (const vid of G.selectedIds) {
         const v = G.snapshot?.villagers.find(x => x.id === vid);

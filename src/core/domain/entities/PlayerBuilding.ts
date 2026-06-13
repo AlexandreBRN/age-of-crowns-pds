@@ -157,6 +157,18 @@ export class PlayerBuilding {
     this._hp = Math.max(0, this._hp - amount);
   }
 
+  get needsRepair(): boolean { return this._status === 'complete' && this._hp < this._maxHp; }
+
+  /** Quanto de vida o reparo recupera por tick — proporcional ao tempo de construção. */
+  get repairPerTick(): number { return Math.max(1, Math.ceil(this._maxHp / this.config.constructionTicks)); }
+
+  /** Recupera vida (somente em construções concluídas). Retorna true ao atingir o máximo. */
+  repair(amount: number): boolean {
+    if (this._status !== 'complete') return false;
+    this._hp = Math.min(this._maxHp, this._hp + amount);
+    return this._hp >= this._maxHp;
+  }
+
   /** Conclui a construção imediatamente — usado ao dividir uma muralha em segmentos. */
   markComplete(): void {
     this._constructionTicksRemaining = 0;
