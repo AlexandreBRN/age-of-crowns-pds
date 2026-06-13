@@ -105,12 +105,18 @@ export const BUILDING_CONFIGS: Record<PlayerBuildingType, BuildingConfig> = {
   },
 };
 
+// Máximo de arqueiros que podem guarnecer uma torre defensiva.
+export const TOWER_GARRISON_MAX = 3;
+
 export class PlayerBuilding {
   private _status: BuildingStatus;
   private _constructionTicksRemaining: number;
   private readonly _constructionTotalTicks: number;
   private _hp: number;
   private readonly _maxHp: number;
+  // Combate de torre guarnecida (só usado por watchtower): alvo atual e cooldown.
+  private _towerTargetId: string | null = null;
+  private _towerCooldown = 0;
   // Footprint explícito em tiles. Usado por muros, que são uma única construção
   // contínua cobrindo vários tiles em linha. null = construção retangular normal.
   private readonly _cells: { x: number; y: number }[] | null;
@@ -187,6 +193,14 @@ export class PlayerBuilding {
     return false;
   }
 
+  // ── Combate de torre guarnecida ────────────────────────────────────────────
+  get towerTargetId(): string | null { return this._towerTargetId; }
+  setTowerTarget(id: string): void { this._towerTargetId = id; }
+  clearTowerTarget(): void { this._towerTargetId = null; }
+  tickTowerCooldown(): void { if (this._towerCooldown > 0) this._towerCooldown--; }
+  get canTowerFire(): boolean { return this._towerCooldown <= 0; }
+  resetTowerCooldown(ticks: number): void { this._towerCooldown = ticks; }
+
   get occupiedTiles(): { x: number; y: number }[] {
     if (this._cells) return this._cells.map(c => ({ x: c.x, y: c.y }));
     const tiles: { x: number; y: number }[] = [];
@@ -198,7 +212,7 @@ export class PlayerBuilding {
     return tiles;
   }
 
-  toJSON() {
+  toJSON(garrison?: number) {
     return {
       id: this._id,
       ownerId: this._ownerId,
@@ -213,6 +227,7 @@ export class PlayerBuilding {
       hp: this._hp,
       maxHp: this._cells ? this._maxHp : this.config.maxHp,
       ...(this._cells ? { cells: this._cells.map(c => ({ x: c.x, y: c.y })) } : {}),
+      ...(garrison !== undefined ? { garrison, garrisonMax: TOWER_GARRISON_MAX, towerTargetId: this._towerTargetId } : {}),
     };
   }
 }

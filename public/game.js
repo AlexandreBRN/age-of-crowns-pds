@@ -1473,6 +1473,56 @@ function renderWallChain(snapshot, b) {
   }
 }
 
+// Garrison badge over a watchtower + animated arrows toward its current target.
+// Number of arrows in flight = number of garrisoned archers (1/2/3 flechas).
+function renderTowerGarrison(b) {
+  const ctx = G.ctx;
+  if (b.garrison === undefined) return;
+  const count = b.garrison;
+  const max = b.garrisonMax ?? 3;
+  const ground = worldToScreen(b.x + 0.5, b.y + 0.5);
+
+  ctx.save();
+  // Badge above the tower
+  ctx.font = 'bold 11px Georgia';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  const label = `🏹 ${count}/${max}`;
+  const bw = ctx.measureText(label).width + 12;
+  const bx = ground.sx, by = ground.sy - 96;
+  ctx.fillStyle = 'rgba(20,12,6,0.82)';
+  ctx.fillRect(bx - bw / 2, by - 9, bw, 17);
+  ctx.fillStyle = count > 0 ? '#ffe080' : '#998060';
+  ctx.fillText(label, bx, by);
+
+  // Arrows flying to the current target
+  if (count > 0 && b.towerTargetId) {
+    const target = G.snapshot?.villagers.find(v => v.id === b.towerTargetId);
+    if (target) {
+      const tp = target.subPosition ?? target.position;
+      const to = worldToScreen(tp.x + 0.5, tp.y + 0.5);
+      const fx = ground.sx, fy = ground.sy - 64;          // shoot from tower top
+      const tx2 = to.sx, ty2 = to.sy - 6;
+      const ang = Math.atan2(ty2 - fy, tx2 - fx);
+      const now = performance.now();
+      for (let i = 0; i < count; i++) {
+        const t = ((now / 360) + i / count) % 1;
+        const ax = fx + (tx2 - fx) * t;
+        const ay = fy + (ty2 - fy) * t - Math.sin(t * Math.PI) * 16;  // arc up
+        ctx.save();
+        ctx.translate(ax, ay);
+        ctx.rotate(ang);
+        ctx.strokeStyle = '#e8d0a0'; ctx.lineWidth = 2;
+        ctx.beginPath(); ctx.moveTo(-6, 0); ctx.lineTo(5, 0); ctx.stroke();
+        ctx.fillStyle = '#fff';
+        ctx.beginPath(); ctx.moveTo(7, 0); ctx.lineTo(2, -2.5); ctx.lineTo(2, 2.5); ctx.closePath(); ctx.fill();
+        ctx.restore();
+      }
+    }
+  }
+  ctx.restore();
+}
+
 // ── Player Building (iso 3D boxes by type) ──────────────────────────────────
 function renderPlayerBuilding(snapshot, b) {
   const ctx = G.ctx;
@@ -1614,6 +1664,7 @@ function renderPlayerBuilding(snapshot, b) {
       ctx.closePath();
       ctx.fill();
       topAnchor = { sx: cT.sx, sy: cT.sy - 18 };
+      renderTowerGarrison(b);
       break;
     }
 
@@ -2226,6 +2277,15 @@ function ownBuildingAt(tx, ty) {
   return null;
 }
 
+// Own completed watchtower at tile — target for garrisoning archers.
+function ownWatchtowerAt(tx, ty) {
+  for (const b of G.snapshot?.playerBuildings ?? []) {
+    if (b.type !== 'watchtower' || b.ownerId !== G.playerId || b.status !== 'complete') continue;
+    if (buildingCoversTile(b, tx, ty)) return b;
+  }
+  return null;
+}
+
 // True if some unit is currently attacking this building (used to show its HP bar).
 function isBuildingUnderAttack(id) {
   for (const v of G.snapshot?.villagers ?? []) {
@@ -2432,6 +2492,23 @@ function setupInput() {
       return;
     }
 
+    // Click on an own watchtower: garrison selected archers, or select it to inspect.
+    const tower = ownWatchtowerAt(tx, ty);
+    if (tower) {
+      const archers = [...G.selectedIds]
+        .map(id => G.snapshot?.villagers.find(x => x.id === id))
+        .filter(a => a && a.unitType === 'archer');
+      if (archers.length > 0) {
+        for (const a of archers) send({ type: 'garrison_archer', archerId: a.id, towerId: tower.id });
+        updatePanel();
+        return;
+      }
+      G.selectedIds.clear();
+      G.selectedBuildingId = tower.id;  // panel shows garrison + remove button
+      updatePanel();
+      return;
+    }
+
     const v = villagerAtTile(tx, ty);
     if (v) {
       if (!e.shiftKey) G.selectedIds.clear();
@@ -2525,6 +2602,10 @@ function setupInput() {
 
   document.getElementById('btn-advance-era')?.addEventListener('click', () => {
     send({ type: 'advance_era' });
+  });
+
+  document.getElementById('btn-ungarrison')?.addEventListener('click', () => {
+    if (G.selectedBuildingId) send({ type: 'ungarrison_tower', towerId: G.selectedBuildingId });
   });
 }
 
@@ -2630,6 +2711,27 @@ function updateBuildBar(resources) {
 
 function updatePanel() {
   const el = document.getElementById('selection-info');
+  const towerSection = document.getElementById('tower-section');
+
+  // A building is selected (e.g. a watchtower): show its info + garrison panel.
+  const selBuilding = (G.selectedBuildingId && G.selectedIds.size === 0 && G.snapshot)
+    ? (G.snapshot.playerBuildings ?? []).find(b => b.id === G.selectedBuildingId)
+    : null;
+  if (selBuilding) {
+    const def = BUILDING_DEFS[selBuilding.type];
+    el.textContent = `${def?.label ?? 'Construção'}\n❤ ${Math.round(selBuilding.hp)}/${Math.round(selBuilding.maxHp)}`;
+    if (selBuilding.type === 'watchtower' && selBuilding.garrison !== undefined) {
+      towerSection.style.display = '';
+      document.getElementById('tower-garrison-label').textContent =
+        `Arqueiros: ${selBuilding.garrison}/${selBuilding.garrisonMax ?? 3}`;
+      document.getElementById('btn-ungarrison').disabled = selBuilding.garrison === 0;
+    } else {
+      towerSection.style.display = 'none';
+    }
+    return;
+  }
+  towerSection.style.display = 'none';
+
   if (G.selectedIds.size === 0) {
     el.textContent = 'Clique num aldeão para selecionar.';
     return;

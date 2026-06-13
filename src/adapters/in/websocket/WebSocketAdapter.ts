@@ -112,6 +112,21 @@ export class WebSocketAdapter {
         );
         break;
 
+      case 'garrison_archer':
+        this.sessionRepository.findDefault().commandGarrisonArcher(
+          currentPlayerId,
+          String(message.archerId),
+          String(message.towerId),
+        );
+        break;
+
+      case 'ungarrison_tower':
+        this.sessionRepository.findDefault().commandUngarrison(
+          currentPlayerId,
+          String(message.towerId),
+        );
+        break;
+
       case 'place_building':
         this.placeBuildingUseCase.execute({
           playerId: currentPlayerId,

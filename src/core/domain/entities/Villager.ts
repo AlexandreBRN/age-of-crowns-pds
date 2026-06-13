@@ -78,6 +78,8 @@ export class Villager {
   private _constructQueue: string[] = [];
   private _attackTargetId: string | null = null;
   private _attackTargetKind: AttackTargetKind | null = null;
+  // Torre para a qual o arqueiro está indo se guarnecer (entra ao chegar).
+  private _pendingGarrisonTowerId: string | null = null;
   // Alvo final ordenado pelo jogador. O alvo "atual" acima pode passar a ser um
   // obstáculo (muro/portão) no caminho; o final é retomado quando o obstáculo cai.
   private _attackGoalId: string | null = null;
@@ -137,6 +139,7 @@ export class Villager {
     this._constructQueue = [];
     this._attackTargetId = null;
     this._attackTargetKind = null;
+    this._pendingGarrisonTowerId = null;
     this._gatherTickCounter = 0;
     this._state = 'moving';
   }
@@ -152,6 +155,7 @@ export class Villager {
     this._constructQueue = [];
     this._attackTargetId = null;
     this._attackTargetKind = null;
+    this._pendingGarrisonTowerId = null;
     this._gatherTickCounter = 0;
     this._state = 'moving';
   }
@@ -177,6 +181,7 @@ export class Villager {
     this._gatherTargetY = null;
     this._attackTargetId = null;
     this._attackTargetKind = null;
+    this._pendingGarrisonTowerId = null;
     this._gatherTickCounter = 0;
     this._state = 'moving';
   }
@@ -184,6 +189,23 @@ export class Villager {
   setConstructQueue(ids: string[]): void { this._constructQueue = ids.slice(); }
   dequeueConstruct(): string | null { return this._constructQueue.shift() ?? null; }
   get hasConstructQueue(): boolean { return this._constructQueue.length > 0; }
+
+  // ── Guarnição de torre ──────────────────────────────────────────────────────
+  get pendingGarrisonTowerId(): string | null { return this._pendingGarrisonTowerId; }
+  clearPendingGarrison(): void { this._pendingGarrisonTowerId = null; }
+
+  /** Caminha até a torre para se guarnecer nela ao chegar. */
+  commandGarrisonMove(towerId: string, destX: number, destY: number): void {
+    this.commandMove(destX, destY);
+    this._pendingGarrisonTowerId = towerId;
+  }
+
+  /** Reposiciona a unidade (usado ao desembarcar de uma torre) e a deixa ociosa. */
+  placeAt(x: number, y: number): void {
+    this._x = x;
+    this._y = y;
+    this.commandIdle();
+  }
 
   commandAttack(targetId: string, targetKind: AttackTargetKind): void {
     if (this.config.attackDamage === 0) return; // villagers cannot attack
@@ -194,6 +216,7 @@ export class Villager {
     this._gatherTargetId = null;
     this._constructTargetId = null;
     this._constructQueue = [];
+    this._pendingGarrisonTowerId = null;
     this._moveTargetX = null;
     this._moveTargetY = null;
     this._path = [];
@@ -228,6 +251,7 @@ export class Villager {
     this._gatherTargetY = null;
     this._constructTargetId = null;
     this._constructQueue = [];
+    this._pendingGarrisonTowerId = null;
     this._attackTargetId = null;
     this._attackTargetKind = null;
     this._attackGoalId = null;
@@ -252,6 +276,7 @@ export class Villager {
     this._gatherTargetY = null;
     this._constructTargetId = null;
     this._constructQueue = [];
+    this._pendingGarrisonTowerId = null;
     this._attackTargetId = null;
     this._attackTargetKind = null;
     this._attackGoalId = null;

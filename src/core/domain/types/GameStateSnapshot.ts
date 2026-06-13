@@ -55,6 +55,9 @@ export interface PlayerBuildingDTO {
   hp: number;
   maxHp: number;
   cells?: { x: number; y: number }[];       // footprint contínuo (muros) — presente só em muros
+  garrison?: number;                        // arqueiros guarnecidos (só torres de vigia)
+  garrisonMax?: number;                     // capacidade de guarnição
+  towerTargetId?: string | null;            // alvo atual da torre (para desenhar as flechas)
 }
 
 export interface GameStateSnapshot {

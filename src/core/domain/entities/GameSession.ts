@@ -2,7 +2,7 @@ import { v4 as uuidv4 } from 'uuid';
 import { Villager, UnitType, UNIT_CONFIGS, AttackTargetKind } from './Villager';
 import { TownCenter } from './TownCenter';
 import { ResourceNode, RESOURCE_YIELD } from './ResourceNode';
-import { PlayerBuilding, PlayerBuildingType, BUILDING_CONFIGS, BuildingCost } from './PlayerBuilding';
+import { PlayerBuilding, PlayerBuildingType, BUILDING_CONFIGS, BuildingCost, TOWER_GARRISON_MAX } from './PlayerBuilding';
 import { VillagerId } from '../value-objects/VillagerId';
 import { Resources } from '../value-objects/Resources';
 import { TileType, TILE_WALKABLE } from '../value-objects/TileType';
@@ -55,6 +55,8 @@ export class GameSession {
   private readonly _townCenters: Map<string, TownCenter> = new Map();
   private readonly _resourceNodes: Map<string, ResourceNode> = new Map();
   private readonly _playerBuildings: Map<string, PlayerBuilding> = new Map();
+  // Arqueiros guarnecidos por torre (removidos do campo enquanto dentro dela).
+  private readonly _garrisons: Map<string, Villager[]> = new Map();
   private _tick = 0;
   private _gameOver = false;
   private _winnerId: string | null = null;
@@ -190,6 +192,33 @@ export class GameSession {
       dest = this._adjacentTile(building.x, building.y, building.width, building.height);
     }
     if (dest) villager.commandConstruct(building.id, dest.x, dest.y);
+  }
+
+  /** Ordena um arqueiro a caminhar até a torre e se guarnecer nela (máx. 3). */
+  commandGarrisonArcher(playerId: string, archerId: string, towerId: string): void {
+    const archer = this._villagers.get(archerId);
+    if (!archer) throw new Error('Arqueiro não encontrado');
+    if (archer.ownerId !== playerId) throw new Error('Unidade não é sua');
+    if (archer.unitType !== 'archer') throw new Error('Apenas arqueiros podem guarnecer torres');
+    if (archer.isDying) throw new Error('Unidade está morrendo');
+    const tower = this._playerBuildings.get(towerId);
+    if (!tower || tower.type !== 'watchtower') throw new Error('Selecione uma Torre de Vigia');
+    if (tower.ownerId !== playerId) throw new Error('Torre não é sua');
+    if (!tower.isComplete) throw new Error('A torre ainda está em construção');
+    if ((this._garrisons.get(towerId)?.length ?? 0) >= TOWER_GARRISON_MAX) {
+      throw new Error('A torre está cheia (máx. 3 arqueiros)');
+    }
+    const dest = this._adjacentTile(tower.x, tower.y, tower.width, tower.height);
+    if (!dest) throw new Error('Não há espaço ao redor da torre');
+    archer.commandGarrisonMove(towerId, dest.x, dest.y);
+  }
+
+  /** Remove (desembarca) todos os arqueiros guarnecidos em uma torre. */
+  commandUngarrison(playerId: string, towerId: string): void {
+    const tower = this._playerBuildings.get(towerId);
+    if (!tower || tower.type !== 'watchtower') throw new Error('Selecione uma Torre de Vigia');
+    if (tower.ownerId !== playerId) throw new Error('Torre não é sua');
+    this._ejectGarrison(towerId);
   }
 
   commandVillagerAttack(villagerId: string, targetId: string, targetKind: AttackTargetKind): void {
@@ -515,6 +544,39 @@ export class GameSession {
       if (enemy) unit.commandAttack(enemy.id, enemy.kind);
     }
 
+    // ── Guarnição: arqueiros que chegaram à torre entram nela ──────────────────
+    const toGarrison: Villager[] = [];
+    for (const v of this._villagers.values()) {
+      if (!v.pendingGarrisonTowerId || v.state === 'moving') continue;
+      const tower = this._playerBuildings.get(v.pendingGarrisonTowerId);
+      const count = this._garrisons.get(v.pendingGarrisonTowerId)?.length ?? 0;
+      const adjacent = !!tower && tower.occupiedTiles.some(t =>
+        Math.max(Math.abs(t.x - v.x), Math.abs(t.y - v.y)) <= 1);
+      if (tower && tower.isComplete && tower.type === 'watchtower' && adjacent && count < TOWER_GARRISON_MAX) {
+        toGarrison.push(v);
+      } else {
+        v.clearPendingGarrison(); // torre cheia/destruída ou inalcançável
+      }
+    }
+    for (const v of toGarrison) this._garrisonArcher(v);
+
+    // ── Combate das torres guarnecidas (atira N flechas = N arqueiros) ─────────
+    const archerCfg = UNIT_CONFIGS.archer;
+    for (const tower of this._playerBuildings.values()) {
+      if (tower.type !== 'watchtower' || !tower.isComplete) continue;
+      const count = this._garrisons.get(tower.id)?.length ?? 0;
+      if (count === 0) { tower.clearTowerTarget(); continue; }
+      tower.tickTowerCooldown();
+      const cx = tower.x + 0.5, cy = tower.y + 0.5;
+      const targetId = this._findEnemyUnitNear(cx, cy, archerCfg.attackRange, tower.ownerId);
+      if (!targetId) { tower.clearTowerTarget(); continue; }
+      tower.setTowerTarget(targetId);
+      if (tower.canTowerFire) {
+        this._applyDamage(targetId, 'unit', archerCfg.attackDamage * count);
+        tower.resetTowerCooldown(archerCfg.attackCooldownTicks);
+      }
+    }
+
     // ── Resource gathering ────────────────────────────────────────────────────
     if (this._tick % GATHER_INTERVAL_TICKS === 0) {
       for (const villager of this._villagers.values()) {
@@ -569,7 +631,11 @@ export class GameSession {
       if (v.shouldBeRemoved) this._villagers.delete(id);
     }
     for (const [id, b] of this._playerBuildings) {
-      if (b.isDestroyed) this._playerBuildings.delete(id);
+      if (b.isDestroyed) {
+        // Torre destruída: ejeta os arqueiros guarnecidos antes de remover.
+        if (this._garrisons.has(id)) this._ejectGarrison(id);
+        this._playerBuildings.delete(id);
+      }
     }
     for (const [id, tc] of this._townCenters) {
       if (tc.isDestroyed) this._townCenters.delete(id);
@@ -611,7 +677,8 @@ export class GameSession {
       resourceNodes: Array.from(this._resourceNodes.values())
         .filter(n => !n.isDepleted)
         .map(n => n.toJSON()),
-      playerBuildings: Array.from(this._playerBuildings.values()).map(b => b.toJSON()),
+      playerBuildings: Array.from(this._playerBuildings.values()).map(b =>
+        b.toJSON(b.type === 'watchtower' ? (this._garrisons.get(b.id)?.length ?? 0) : undefined)),
     };
   }
 
@@ -846,6 +913,57 @@ export class GameSession {
       if (this._isTileWalkable(c.x, c.y) && !this._isTileBlockedByCompleteBuilding(c.x, c.y)) return c;
     }
     return null;
+  }
+
+  /** Todos os tiles livres ao redor de uma construção (para desembarcar guarnição). */
+  private _tilesAroundBuilding(bx: number, by: number, bw: number, bh: number): { x: number; y: number }[] {
+    const candidates: { x: number; y: number }[] = [];
+    for (let dy = 0; dy < bh; dy++) candidates.push({ x: bx + bw, y: by + dy });
+    for (let dx = 0; dx < bw; dx++) candidates.push({ x: bx + dx, y: by + bh });
+    for (let dy = 0; dy < bh; dy++) candidates.push({ x: bx - 1, y: by + dy });
+    for (let dx = 0; dx < bw; dx++) candidates.push({ x: bx + dx, y: by - 1 });
+    return candidates.filter(c =>
+      this._isTileWalkable(c.x, c.y) && !this._isTileBlockedByCompleteBuilding(c.x, c.y));
+  }
+
+  /** Coloca o arqueiro dentro da torre (sai do campo). */
+  private _garrisonArcher(archer: Villager): void {
+    const towerId = archer.pendingGarrisonTowerId;
+    if (!towerId) return;
+    archer.clearPendingGarrison();
+    this._villagers.delete(archer.id.value);
+    const list = this._garrisons.get(towerId) ?? [];
+    list.push(archer);
+    this._garrisons.set(towerId, list);
+  }
+
+  /** Tira todos os arqueiros de uma torre e os recoloca em volta dela. */
+  private _ejectGarrison(towerId: string): void {
+    const list = this._garrisons.get(towerId);
+    if (!list || list.length === 0) return;
+    const tower = this._playerBuildings.get(towerId);
+    const spots = tower
+      ? this._tilesAroundBuilding(tower.x, tower.y, tower.width, tower.height)
+      : [];
+    list.forEach((archer, i) => {
+      const spot = spots[i % spots.length] ?? (tower ? { x: tower.x, y: tower.y } : { x: archer.x, y: archer.y });
+      archer.placeAt(spot.x, spot.y);
+      this._villagers.set(archer.id.value, archer);
+    });
+    this._garrisons.delete(towerId);
+    tower?.clearTowerTarget();
+  }
+
+  /** Id do inimigo (unidade) mais próximo dentro do alcance a partir de um ponto. */
+  private _findEnemyUnitNear(cx: number, cy: number, range: number, ownerId: string): string | null {
+    let best: string | null = null;
+    let bestD = range + 1;
+    for (const v of this._villagers.values()) {
+      if (v.ownerId === ownerId || v.isDead) continue;
+      const d = Math.max(Math.abs(v.x - cx), Math.abs(v.y - cy));
+      if (d <= range && d < bestD) { bestD = d; best = v.id.value; }
+    }
+    return best;
   }
 
   private _getTownCenterOf(playerId: string): TownCenter {
