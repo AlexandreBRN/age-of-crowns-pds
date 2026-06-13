@@ -34,13 +34,16 @@ export class GameLoopService {
 
     if (session.players.length < 2) return;
 
-    session.advanceTick();
-    this.sessionRepository.save(session);
+    // Partida encerrada: o estado fica congelado (advanceTick é no-op), mas
+    // continuamos transmitindo o snapshot final a cada tick. Assim os DOIS
+    // jogadores recebem, de forma simultânea e confiável, as barras de vida
+    // finais e a tela de vitória/derrota — sem depender de um único frame.
+    if (!session.isGameOver) {
+      session.advanceTick();
+      this.sessionRepository.save(session);
+    }
 
     const snapshot = session.toStateSnapshot();
     this.eventPublisher.publishStateSnapshot(session.id, snapshot);
-
-    // Partida encerrada: congela a velocidade do jogo (para de avançar ticks).
-    if (session.isGameOver) this.stop();
   }
 }

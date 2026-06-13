@@ -198,6 +198,7 @@ const G = {
   // Building placement
   placingBuildingType: null,  // string key from BUILDING_DEFS, or null
   selectedBuildingId: null,   // id of an own building selected for inspection (HP bar), or null
+  resultShown: false,         // end-of-match overlay already built (avoids per-tick rebuild)
   wallStart: null,            // { tx, ty } — first tile of a wall drag, or null
   ghostTile: null,            // { tx, ty } — current cursor tile
 
@@ -2850,6 +2851,8 @@ function escapeHtml(s) {
 
 // Centered end-of-match screen: Vitória/Derrota + resource scoreboard for both teams.
 function showResultScreen(snapshot) {
+  if (G.resultShown) return;   // já exibida — o servidor reenvia o estado a cada tick
+  G.resultShown = true;
   const overlay = document.getElementById('result-overlay');
   const title = document.getElementById('result-title');
   const won = !!snapshot.winnerId && snapshot.winnerId === G.playerId;
@@ -2878,6 +2881,7 @@ function showResultScreen(snapshot) {
 }
 
 function hideResultScreen() {
+  G.resultShown = false;
   document.getElementById('result-overlay').style.display = 'none';
 }
 
