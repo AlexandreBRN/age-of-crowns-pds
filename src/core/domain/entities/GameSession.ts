@@ -249,10 +249,10 @@ export class GameSession {
   }
 
   /**
-   * Constrói um muro contínuo do ponto inicial ao final. A linha é "encaixada" em
-   * uma das 8 direções isométricas (horizontal, vertical ou diagonal) e todos os
-   * segmentos viram UMA única construção contínua. O custo e o tempo escalam pelo
-   * número de segmentos. O aldeão vai até o segmento mais próximo dele.
+   * Cria uma linha de muralhas: a linha é "encaixada" em uma das 8 direções
+   * isométricas e cada tile vira um segmento de muro independente (progresso,
+   * vida e barra próprios). O aldeão constrói um segmento por vez — caminha até o
+   * primeiro, conclui, e só então segue para o próximo da fila.
    */
   placeWall(playerId: string, startX: number, startY: number, endX: number, endY: number, villagerId?: string): void {
     const player = this._players.get(playerId);
@@ -275,21 +275,54 @@ export class GameSession {
       throw new Error('Recursos insuficientes para construir o muro');
     }
 
+    // Um segmento de muro independente por tile (todos em construção).
     const hpMult = ERA_HP_MULT[player.era] ?? 1.0;
-    const building = new PlayerBuilding(uuidv4(), playerId, 'wall', cells[0].x, cells[0].y, hpMult, cells);
-    this._playerBuildings.set(building.id, building);
+    const segments = cells.map(c => {
+      const seg = new PlayerBuilding(uuidv4(), playerId, 'wall', c.x, c.y, hpMult);
+      this._playerBuildings.set(seg.id, seg);
+      return seg;
+    });
     this._players.set(playerId, {
       ...player,
       resources: player.resources.subtract(totalCost),
     });
 
-    // O aldeão vai até a parte mais próxima do muro.
+    // O aldeão percorre a muralha a partir da ponta mais próxima dele,
+    // construindo peça por peça (alvo atual + fila do restante).
     const builder = this._findBuilder(playerId, villagerId, cells[0].x, cells[0].y, 1, 1);
     if (builder) {
-      const near = this._nearestCell(cells, builder.x, builder.y);
-      const dest = this._adjacentTile(near.x, near.y, 1, 1);
-      if (dest) builder.commandConstruct(building.id, dest.x, dest.y);
+      const ordered = this._orderSegmentsFromBuilder(segments, builder.x, builder.y);
+      const first = ordered[0];
+      const dest = this._adjacentTile(first.x, first.y, 1, 1);
+      if (dest) {
+        builder.commandConstruct(first.id, dest.x, dest.y);
+        builder.setConstructQueue(ordered.slice(1).map(s => s.id));
+      }
     }
+  }
+
+  /** Ordena os segmentos a partir da ponta da linha mais próxima do aldeão. */
+  private _orderSegmentsFromBuilder(segments: PlayerBuilding[], bx: number, by: number): PlayerBuilding[] {
+    if (segments.length <= 1) return segments;
+    const first = segments[0];
+    const last = segments[segments.length - 1];
+    const dFirst = Math.abs(first.x - bx) + Math.abs(first.y - by);
+    const dLast = Math.abs(last.x - bx) + Math.abs(last.y - by);
+    return dLast < dFirst ? [...segments].reverse() : segments;
+  }
+
+  /** Move o aldeão para o próximo segmento da fila (pulando os já concluídos). */
+  private _advanceConstructQueue(villager: Villager): void {
+    let nextId = villager.dequeueConstruct();
+    while (nextId) {
+      const next = this._playerBuildings.get(nextId);
+      if (next && !next.isComplete) {
+        const dest = this._adjacentTile(next.x, next.y, next.width, next.height);
+        if (dest) { villager.continueConstruct(next.id, dest.x, dest.y); return; }
+      }
+      nextId = villager.dequeueConstruct();
+    }
+    villager.setIdle();
   }
 
   /**
@@ -355,21 +388,6 @@ export class GameSession {
     }
   }
 
-  /**
-   * Substitui a muralha-grupo concluída por um prédio de muro independente por
-   * tile (1×1, já concluído). A partir daí cada segmento tem vida própria e é
-   * destruído isoladamente, abrindo brechas sem afetar os vizinhos.
-   */
-  private _splitWallIntoSegments(group: PlayerBuilding): void {
-    const hpMult = ERA_HP_MULT[this._players.get(group.ownerId)?.era ?? 1] ?? 1.0;
-    for (const cell of group.occupiedTiles) {
-      const seg = new PlayerBuilding(uuidv4(), group.ownerId, 'wall', cell.x, cell.y, hpMult);
-      seg.markComplete();
-      this._playerBuildings.set(seg.id, seg);
-    }
-    this._playerBuildings.delete(group.id);
-  }
-
   private _nearestCell(cells: { x: number; y: number }[], x: number, y: number): { x: number; y: number } {
     let best = cells[0];
     let bestD = Infinity;
@@ -401,16 +419,10 @@ export class GameSession {
     for (const villager of this._villagers.values()) {
       if (villager.state !== 'constructing' || !villager.constructTargetId) continue;
       const building = this._playerBuildings.get(villager.constructTargetId);
-      if (!building || building.isComplete) { villager.setIdle(); continue; }
+      if (!building || building.isComplete) { this._advanceConstructQueue(villager); continue; }
       building.tickConstruction();
-      if (building.isComplete) {
-        // Uma muralha é construída como um todo contínuo, mas ao concluir vira
-        // segmentos independentes (cada um com sua própria vida) para fins de combate.
-        if (building.type === 'wall' && building.occupiedTiles.length > 1) {
-          this._splitWallIntoSegments(building);
-        }
-        villager.setIdle();
-      }
+      // Segmento concluído: segue para o próximo da fila (muralha peça por peça).
+      if (building.isComplete) this._advanceConstructQueue(villager);
     }
 
     // ── Combat ───────────────────────────────────────────────────────────────

@@ -73,6 +73,9 @@ export class Villager {
   private _gatherTargetY: number | null = null;
   private _gatherTickCounter = 0;
   private _constructTargetId: string | null = null;
+  // Fila de segmentos a construir em sequência (ex.: uma linha de muralha). O
+  // aldeão constrói o alvo atual e só então segue para o próximo da fila.
+  private _constructQueue: string[] = [];
   private _attackTargetId: string | null = null;
   private _attackTargetKind: AttackTargetKind | null = null;
   // Alvo final ordenado pelo jogador. O alvo "atual" acima pode passar a ser um
@@ -131,6 +134,7 @@ export class Villager {
     this._gatherTargetX = null;
     this._gatherTargetY = null;
     this._constructTargetId = null;
+    this._constructQueue = [];
     this._attackTargetId = null;
     this._attackTargetKind = null;
     this._gatherTickCounter = 0;
@@ -145,13 +149,25 @@ export class Villager {
     this._moveTargetY = nodeY;
     this._path = [];
     this._constructTargetId = null;
+    this._constructQueue = [];
     this._attackTargetId = null;
     this._attackTargetKind = null;
     this._gatherTickCounter = 0;
     this._state = 'moving';
   }
 
+  /** Ordem de construção do jogador — descarta qualquer fila anterior. */
   commandConstruct(buildingId: string, destX: number, destY: number): void {
+    this._constructQueue = [];
+    this._applyConstructTarget(buildingId, destX, destY);
+  }
+
+  /** Avança para o próximo segmento da fila — preserva a fila restante. */
+  continueConstruct(buildingId: string, destX: number, destY: number): void {
+    this._applyConstructTarget(buildingId, destX, destY);
+  }
+
+  private _applyConstructTarget(buildingId: string, destX: number, destY: number): void {
     this._constructTargetId = buildingId;
     this._moveTargetX = destX;
     this._moveTargetY = destY;
@@ -165,6 +181,10 @@ export class Villager {
     this._state = 'moving';
   }
 
+  setConstructQueue(ids: string[]): void { this._constructQueue = ids.slice(); }
+  dequeueConstruct(): string | null { return this._constructQueue.shift() ?? null; }
+  get hasConstructQueue(): boolean { return this._constructQueue.length > 0; }
+
   commandAttack(targetId: string, targetKind: AttackTargetKind): void {
     if (this.config.attackDamage === 0) return; // villagers cannot attack
     this._attackTargetId = targetId;
@@ -173,6 +193,7 @@ export class Villager {
     this._attackGoalKind = targetKind;
     this._gatherTargetId = null;
     this._constructTargetId = null;
+    this._constructQueue = [];
     this._moveTargetX = null;
     this._moveTargetY = null;
     this._path = [];
@@ -206,6 +227,7 @@ export class Villager {
     this._gatherTargetX = null;
     this._gatherTargetY = null;
     this._constructTargetId = null;
+    this._constructQueue = [];
     this._attackTargetId = null;
     this._attackTargetKind = null;
     this._attackGoalId = null;
@@ -229,6 +251,7 @@ export class Villager {
     this._gatherTargetX = null;
     this._gatherTargetY = null;
     this._constructTargetId = null;
+    this._constructQueue = [];
     this._attackTargetId = null;
     this._attackTargetKind = null;
     this._attackGoalId = null;

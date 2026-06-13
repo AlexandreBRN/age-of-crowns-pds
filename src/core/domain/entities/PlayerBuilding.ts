@@ -29,10 +29,10 @@ export interface BuildingConfig {
   blocksMovement: boolean;
 }
 
-// Quanto tempo (em ticks) cada segmento de muro leva para ser construído.
-// 4 ticks = 1 segundo (loop a 250ms). Um muro contínuo de N segmentos leva N
-// segundos no total. Ajuste aqui para alterar a velocidade de construção do muro.
-export const TICKS_PER_WALL_SEGMENT = 4;
+// Quanto tempo (em ticks) cada segmento de muro leva para ser construído após o
+// aldeão iniciar. 8 ticks = ~2 segundos (loop a 250ms) — dá tempo de ver a
+// animação de martelar. Ajuste aqui para alterar a velocidade de construção.
+export const TICKS_PER_WALL_SEGMENT = 8;
 
 export const BUILDING_CONFIGS: Record<PlayerBuildingType, BuildingConfig> = {
   wall: {
@@ -40,7 +40,7 @@ export const BUILDING_CONFIGS: Record<PlayerBuildingType, BuildingConfig> = {
     description: 'Bloqueia a passagem de unidades inimigas.',
     width: 1, height: 1,
     cost: { stone: 2 },
-    constructionTicks: 8,
+    constructionTicks: TICKS_PER_WALL_SEGMENT, // cada segmento leva 1s e é construído sozinho
     maxHp: 150,
     blocksMovement: true,
   },
