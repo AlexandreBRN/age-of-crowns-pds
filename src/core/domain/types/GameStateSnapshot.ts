@@ -58,6 +58,9 @@ export interface PlayerBuildingDTO {
   garrison?: number;                        // arqueiros guarnecidos (só torres de vigia)
   garrisonMax?: number;                     // capacidade de guarnição
   towerTargetId?: string | null;            // alvo atual da torre (para desenhar as flechas)
+  occupants?: number;                       // aldeões trabalhando dentro (construções de produção)
+  occupantsMax?: number;                    // capacidade de trabalhadores
+  producing?: boolean;                      // true se há ≥1 aldeão produzindo
 }
 
 export interface GameStateSnapshot {

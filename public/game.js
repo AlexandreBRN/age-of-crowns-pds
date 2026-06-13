@@ -1798,6 +1798,23 @@ function renderPlayerBuilding(snapshot, b) {
     outlineFootprint(b.x, b.y, w, h, '#ffe070', [4, 3]);
   }
 
+  // Worker-occupancy badge on production buildings (👷 N/M, dim when stopped).
+  if (b.occupantsMax !== undefined && b.status === 'complete') {
+    const ground = worldToScreen(b.x + w / 2, b.y + h / 2);
+    ctx.save();
+    ctx.font = 'bold 11px Georgia';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    const text = `👷 ${b.occupants}/${b.occupantsMax}`;
+    const bw2 = ctx.measureText(text).width + 12;
+    const bx2 = ground.sx, by2 = (topAnchor ? topAnchor.sy : ground.sy) - 16;
+    ctx.fillStyle = 'rgba(20,12,6,0.82)';
+    ctx.fillRect(bx2 - bw2 / 2, by2 - 9, bw2, 17);
+    ctx.fillStyle = b.producing ? '#80e060' : '#c08060';
+    ctx.fillText(text, bx2, by2);
+    ctx.restore();
+  }
+
   // Under-construction overlay: scaffolding + progress bar over the diamond footprint.
   // For sheet-rendered buildings, skip the dark scaffolding overlay (the sheet's
   // frame 0/1 already conveys the state visually) — but still draw the progress bar.
@@ -2286,6 +2303,15 @@ function ownWatchtowerAt(tx, ty) {
   return null;
 }
 
+// Own completed production building at tile — target for sending villagers to work.
+function ownProductionBuildingAt(tx, ty) {
+  for (const b of G.snapshot?.playerBuildings ?? []) {
+    if (b.ownerId !== G.playerId || b.status !== 'complete' || b.occupantsMax === undefined) continue;
+    if (buildingCoversTile(b, tx, ty)) return b;
+  }
+  return null;
+}
+
 // True if some unit is currently attacking this building (used to show its HP bar).
 function isBuildingUnderAttack(id) {
   for (const v of G.snapshot?.villagers ?? []) {
@@ -2509,6 +2535,24 @@ function setupInput() {
       return;
     }
 
+    // Click on an own production building: send selected villagers to work inside,
+    // or select it to inspect occupancy.
+    const prod = ownProductionBuildingAt(tx, ty);
+    if (prod) {
+      const workers = [...G.selectedIds]
+        .map(id => G.snapshot?.villagers.find(x => x.id === id))
+        .filter(a => a && a.unitType === 'villager');
+      if (workers.length > 0) {
+        for (const a of workers) send({ type: 'occupy_building', villagerId: a.id, buildingId: prod.id });
+        updatePanel();
+        return;
+      }
+      G.selectedIds.clear();
+      G.selectedBuildingId = prod.id;
+      updatePanel();
+      return;
+    }
+
     const v = villagerAtTile(tx, ty);
     if (v) {
       if (!e.shiftKey) G.selectedIds.clear();
@@ -2605,7 +2649,11 @@ function setupInput() {
   });
 
   document.getElementById('btn-ungarrison')?.addEventListener('click', () => {
-    if (G.selectedBuildingId) send({ type: 'ungarrison_tower', towerId: G.selectedBuildingId });
+    if (!G.selectedBuildingId) return;
+    const b = (G.snapshot?.playerBuildings ?? []).find(x => x.id === G.selectedBuildingId);
+    if (!b) return;
+    if (b.type === 'watchtower') send({ type: 'ungarrison_tower', towerId: b.id });
+    else send({ type: 'vacate_building', buildingId: b.id });
   });
 }
 
@@ -2719,15 +2767,29 @@ function updatePanel() {
     : null;
   if (selBuilding) {
     const def = BUILDING_DEFS[selBuilding.type];
-    el.textContent = `${def?.label ?? 'Construção'}\n❤ ${Math.round(selBuilding.hp)}/${Math.round(selBuilding.maxHp)}`;
-    if (selBuilding.type === 'watchtower' && selBuilding.garrison !== undefined) {
+    const title = towerSection.querySelector('.panel-title');
+    const label = document.getElementById('tower-garrison-label');
+    const btn = document.getElementById('btn-ungarrison');
+    const isTower = selBuilding.garrison !== undefined;
+    const isProd = selBuilding.occupantsMax !== undefined;
+    let info = `${def?.label ?? 'Construção'}\n❤ ${Math.round(selBuilding.hp)}/${Math.round(selBuilding.maxHp)}`;
+    if (isTower) {
       towerSection.style.display = '';
-      document.getElementById('tower-garrison-label').textContent =
-        `Arqueiros: ${selBuilding.garrison}/${selBuilding.garrisonMax ?? 3}`;
-      document.getElementById('btn-ungarrison').disabled = selBuilding.garrison === 0;
+      title.textContent = 'Torre de Vigia';
+      label.textContent = `Arqueiros: ${selBuilding.garrison}/${selBuilding.garrisonMax ?? 3}`;
+      btn.textContent = 'Remover Arqueiros';
+      btn.disabled = selBuilding.garrison === 0;
+    } else if (isProd) {
+      towerSection.style.display = '';
+      title.textContent = def?.label ?? 'Produção';
+      label.textContent = `Trabalhadores: ${selBuilding.occupants}/${selBuilding.occupantsMax}`;
+      btn.textContent = 'Remover Trabalhadores';
+      btn.disabled = selBuilding.occupants === 0;
+      info += selBuilding.producing ? '\n⚙ Produzindo' : '\n⏸ Parado (sem trabalhadores)';
     } else {
       towerSection.style.display = 'none';
     }
+    el.textContent = info;
     return;
   }
   towerSection.style.display = 'none';

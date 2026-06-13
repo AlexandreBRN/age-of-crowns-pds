@@ -127,6 +127,21 @@ export class WebSocketAdapter {
         );
         break;
 
+      case 'occupy_building':
+        this.sessionRepository.findDefault().commandOccupyBuilding(
+          currentPlayerId,
+          String(message.villagerId),
+          String(message.buildingId),
+        );
+        break;
+
+      case 'vacate_building':
+        this.sessionRepository.findDefault().commandVacateBuilding(
+          currentPlayerId,
+          String(message.buildingId),
+        );
+        break;
+
       case 'place_building':
         this.placeBuildingUseCase.execute({
           playerId: currentPlayerId,

@@ -25,9 +25,18 @@ export interface BuildingConfig {
   constructionTicks: number;
   maxHp: number;
   generates?: BuildingCost;
+  occupantCapacity?: number;   // vagas de trabalhadores (construções de produção)
   visionRadius?: number;
   blocksMovement: boolean;
 }
+
+// Capacidade padrão de trabalhadores das construções de produção (mín. recomendado).
+export const PRODUCTION_OCCUPANT_CAPACITY = 3;
+// A produção começa cheia e fica cada vez mais difícil a cada ciclo, com um piso.
+// Avançar de era reseta a escala para o máximo (volta a render bastante).
+const PRODUCTION_SCALE_MAX = 1.0;
+const PRODUCTION_SCALE_DECAY = 0.88;
+const PRODUCTION_SCALE_FLOOR = 0.25;
 
 // Quanto tempo (em ticks) cada segmento de muro leva para ser construído após o
 // aldeão iniciar. 8 ticks = ~2 segundos (loop a 250ms) — dá tempo de ver a
@@ -65,42 +74,46 @@ export const BUILDING_CONFIGS: Record<PlayerBuildingType, BuildingConfig> = {
   },
   lumber_camp: {
     label: 'Serraria',
-    description: 'Gera +8 madeira a cada 2 segundos automaticamente.',
+    description: 'Gera madeira enquanto houver aldeões trabalhando dentro.',
     width: 2, height: 2,
     cost: { wood: 30, stone: 5 },
     constructionTicks: 20,
     maxHp: 200,
     generates: { wood: 8 },
+    occupantCapacity: PRODUCTION_OCCUPANT_CAPACITY,
     blocksMovement: true,
   },
   gold_mine: {
     label: 'Mina de Ouro',
-    description: 'Gera +5 ouro a cada 2 segundos automaticamente.',
+    description: 'Gera ouro enquanto houver aldeões trabalhando dentro.',
     width: 2, height: 2,
     cost: { stone: 40, wood: 20 },
     constructionTicks: 28,
     maxHp: 200,
     generates: { gold: 5 },
+    occupantCapacity: PRODUCTION_OCCUPANT_CAPACITY,
     blocksMovement: true,
   },
   farm: {
     label: 'Fazenda',
-    description: 'Gera +8 comida a cada 2 segundos automaticamente.',
+    description: 'Gera comida enquanto houver aldeões trabalhando dentro.',
     width: 2, height: 2,
     cost: { wood: 25 },
     constructionTicks: 16,
     maxHp: 150,
     generates: { food: 8 },
+    occupantCapacity: PRODUCTION_OCCUPANT_CAPACITY,
     blocksMovement: true,
   },
   stone_quarry: {
     label: 'Pedreira',
-    description: 'Gera +4 pedra a cada 2 segundos automaticamente.',
+    description: 'Gera pedra enquanto houver aldeões trabalhando dentro.',
     width: 2, height: 2,
     cost: { wood: 30, stone: 10 },
     constructionTicks: 20,
     maxHp: 200,
     generates: { stone: 4 },
+    occupantCapacity: PRODUCTION_OCCUPANT_CAPACITY,
     blocksMovement: true,
   },
 };
@@ -117,6 +130,8 @@ export class PlayerBuilding {
   // Combate de torre guarnecida (só usado por watchtower): alvo atual e cooldown.
   private _towerTargetId: string | null = null;
   private _towerCooldown = 0;
+  // Escala de produção (construções de produção): decai a cada ciclo, reseta na era.
+  private _prodScale = PRODUCTION_SCALE_MAX;
   // Footprint explícito em tiles. Usado por muros, que são uma única construção
   // contínua cobrindo vários tiles em linha. null = construção retangular normal.
   private readonly _cells: { x: number; y: number }[] | null;
@@ -193,6 +208,15 @@ export class PlayerBuilding {
     return false;
   }
 
+  // ── Produção por ocupação ───────────────────────────────────────────────────
+  get isProduction(): boolean { return !!this.config.generates; }
+  get occupantCapacity(): number { return this.config.occupantCapacity ?? 0; }
+  get productionScale(): number { return this._prodScale; }
+  /** Produção fica cada vez mais difícil a cada ciclo (até o piso). */
+  decayProduction(): void { this._prodScale = Math.max(PRODUCTION_SCALE_FLOOR, this._prodScale * PRODUCTION_SCALE_DECAY); }
+  /** Volta a render bastante — chamado ao avançar de era. */
+  resetProduction(): void { this._prodScale = PRODUCTION_SCALE_MAX; }
+
   // ── Combate de torre guarnecida ────────────────────────────────────────────
   get towerTargetId(): string | null { return this._towerTargetId; }
   setTowerTarget(id: string): void { this._towerTargetId = id; }
@@ -212,8 +236,8 @@ export class PlayerBuilding {
     return tiles;
   }
 
-  toJSON(garrison?: number) {
-    return {
+  toJSON(insideCount?: number) {
+    const base = {
       id: this._id,
       ownerId: this._ownerId,
       type: this._type,
@@ -227,7 +251,13 @@ export class PlayerBuilding {
       hp: this._hp,
       maxHp: this._cells ? this._maxHp : this.config.maxHp,
       ...(this._cells ? { cells: this._cells.map(c => ({ x: c.x, y: c.y })) } : {}),
-      ...(garrison !== undefined ? { garrison, garrisonMax: TOWER_GARRISON_MAX, towerTargetId: this._towerTargetId } : {}),
     };
+    if (this._type === 'watchtower') {
+      return { ...base, garrison: insideCount ?? 0, garrisonMax: TOWER_GARRISON_MAX, towerTargetId: this._towerTargetId };
+    }
+    if (this.isProduction) {
+      return { ...base, occupants: insideCount ?? 0, occupantsMax: this.occupantCapacity, producing: (insideCount ?? 0) > 0 };
+    }
+    return base;
   }
 }
