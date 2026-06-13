@@ -48,6 +48,57 @@
 
     #hud-status { margin-left: auto; color: #aaa; font-size: 12px; }
 
+    /* Town Center (Torre Principal) HP overlay — permanent, non-blocking */
+    #tc-hud {
+      position: absolute;
+      top: 8px;
+      left: 50%;
+      transform: translateX(-50%);
+      display: flex;
+      gap: 14px;
+      pointer-events: none;
+      z-index: 6;
+    }
+    .tc-hud-team {
+      background: rgba(20, 12, 6, 0.78);
+      border: 1px solid #5a3a10;
+      border-top: 3px solid #888;
+      border-radius: 6px;
+      padding: 4px 10px 6px;
+      min-width: 170px;
+      text-align: center;
+      box-shadow: 0 2px 8px rgba(0, 0, 0, 0.55);
+    }
+    .tc-hud-name {
+      font-weight: bold;
+      font-size: 12px;
+      text-shadow: 0 1px 2px #000;
+      margin-bottom: 3px;
+      white-space: nowrap;
+    }
+    .tc-hud-bar {
+      height: 12px;
+      background: #3a2a18;
+      border: 1px solid #000;
+      border-radius: 3px;
+      overflow: hidden;
+    }
+    .tc-hud-fill {
+      height: 100%;
+      width: 100%;
+      background: linear-gradient(to bottom, #62e052, #36a02c);
+      transition: width 0.2s linear, background 0.2s;
+    }
+    .tc-hud-fill.critical {
+      background: linear-gradient(to bottom, #ff5a48, #c01e16);
+    }
+    .tc-hud-text {
+      color: #fff;
+      font-size: 11px;
+      margin-top: 2px;
+      text-shadow: 0 1px 2px #000;
+    }
+
     /* Game area */
     #game-area {
       display: flex;
@@ -304,6 +355,20 @@
   <div id="game-area">
     <div id="canvas-wrapper">
       <canvas id="canvas"></canvas>
+
+      <!-- Town Center HP for both teams (updated every tick) -->
+      <div id="tc-hud">
+        <div class="tc-hud-team" id="tc-hud-0" style="display:none">
+          <div class="tc-hud-name">Equipe 1</div>
+          <div class="tc-hud-bar"><div class="tc-hud-fill"></div></div>
+          <div class="tc-hud-text">Vida: –/–</div>
+        </div>
+        <div class="tc-hud-team" id="tc-hud-1" style="display:none">
+          <div class="tc-hud-name">Equipe 2</div>
+          <div class="tc-hud-bar"><div class="tc-hud-fill"></div></div>
+          <div class="tc-hud-text">Vida: –/–</div>
+        </div>
+      </div>
     </div>
 
     <div id="panel">

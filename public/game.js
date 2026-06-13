@@ -612,6 +612,7 @@ function handleMessage(msg) {
         G.myPlayerIndex = G.snapshot.players.findIndex(p => p.id === G.playerId);
         revealAroundBases();
         buildMinimapFog();
+        updateTownCenterHud();
       }
       hideLobby();
       if (msg.waitingForOpponent) showWaiting();
@@ -645,6 +646,7 @@ function handleMessage(msg) {
       G.myPlayerIndex = G.snapshot.players.findIndex(p => p.id === G.playerId);
       updateFogOfWar();
       updateHUD();
+      updateTownCenterHud();
       updatePanel();
       break;
 
@@ -2488,6 +2490,37 @@ function cancelPlacingMode() {
 }
 
 // ─── HUD & Panel ──────────────────────────────────────────────────────────────
+// Permanent overlay: current/max HP of each team's Town Center (Torre Principal),
+// with a proportional bar that turns critical (red) below 30%. Updated every tick.
+function updateTownCenterHud() {
+  if (!G.snapshot) return;
+  const players = G.snapshot.players ?? [];
+  for (let i = 0; i < 2; i++) {
+    const el = document.getElementById('tc-hud-' + i);
+    if (!el) continue;
+    const player = players[i];
+    const tc = player ? G.snapshot.townCenters.find(t => t.ownerId === player.id) : null;
+    if (!player || !tc) { el.style.display = 'none'; continue; }
+    el.style.display = '';
+
+    const teamColor = COLORS.tc[i] ?? '#888';
+    const isMe = player.id === G.playerId;
+    const pct = tc.maxHp > 0 ? Math.max(0, Math.min(1, tc.hp / tc.maxHp)) : 0;
+
+    el.style.borderTopColor = teamColor;
+    const nameEl = el.querySelector('.tc-hud-name');
+    nameEl.textContent = (isMe ? '🛡 ' : '⚔ ') + (player.name || ('Equipe ' + (i + 1)));
+    nameEl.style.color = teamColor;
+
+    const fill = el.querySelector('.tc-hud-fill');
+    fill.style.width = (pct * 100).toFixed(1) + '%';
+    fill.classList.toggle('critical', pct < 0.30);
+
+    el.querySelector('.tc-hud-text').textContent =
+      `Vida: ${Math.round(tc.hp)}/${Math.round(tc.maxHp)}`;
+  }
+}
+
 function updateHUD() {
   if (!G.snapshot || G.myPlayerIndex < 0) return;
   const me = G.snapshot.players[G.myPlayerIndex];
