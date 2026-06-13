@@ -648,6 +648,29 @@ function handleMessage(msg) {
       updateHUD();
       updateTownCenterHud();
       updatePanel();
+      if (G.snapshot.gameOver) showResultScreen(G.snapshot);
+      break;
+
+    case 'game_restarted':
+      // Nova partida: reseta todo o estado do cliente para o estado inicial.
+      hideResultScreen();
+      if (msg.mapTiles) { G.mapTiles = msg.mapTiles; buildMinimapBase(); }
+      G.snapshot = msg.snapshot;
+      G.myPlayerIndex = G.snapshot.players.findIndex(p => p.id === G.playerId);
+      G.revealedTiles = new Set();
+      G.visibleTiles = new Set();
+      G.villagerPrevPos.clear();
+      G.selectedIds.clear();
+      G.selectedBuildingId = null;
+      cancelPlacingMode();
+      revealAroundBases();
+      buildMinimapFog();
+      updateFogOfWar();
+      centerCameraOnSpawn();
+      updateHUD();
+      updateTownCenterHud();
+      updatePanel();
+      setHudStatus('Nova partida iniciada!');
       break;
 
     case 'error':
@@ -2603,15 +2626,17 @@ function updatePanel() {
 // ─── UI helpers ───────────────────────────────────────────────────────────────
 function hideLobby() {
   document.getElementById('lobby').style.display = 'none';
+  centerCameraOnSpawn();
+  if (!G.animFrameId) gameLoop();
+}
 
-  // Center camera on the player's town-center spawn (iso projected)
+// Center camera on the player's town-center spawn (iso projected).
+function centerCameraOnSpawn() {
   const myAnchor = G.myPlayerIndex === 0 ? { x: 2, y: 2 } : { x: 54, y: 54 };
   const { sx, sy } = worldToScreen(myAnchor.x + 1.5, myAnchor.y + 1.5);
   G.camSX = sx - G.canvas.width  / 2 / G.zoom;
   G.camSY = sy - G.canvas.height / 2 / G.zoom;
   clampCamera();
-
-  if (!G.animFrameId) gameLoop();
 }
 
 function showWaiting() {
@@ -2620,6 +2645,44 @@ function showWaiting() {
 
 function hideWaiting() {
   document.getElementById('waiting-overlay').style.display = 'none';
+}
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, c =>
+    ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+
+// Centered end-of-match screen: Vitória/Derrota + resource scoreboard for both teams.
+function showResultScreen(snapshot) {
+  const overlay = document.getElementById('result-overlay');
+  const title = document.getElementById('result-title');
+  const won = !!snapshot.winnerId && snapshot.winnerId === G.playerId;
+  title.textContent = won ? 'Vitória' : 'Derrota';
+  title.className = won ? 'win' : 'lose';
+  document.getElementById('result-subtitle').textContent =
+    won ? 'A Torre Principal inimiga foi destruída!' : 'Sua Torre Principal foi destruída!';
+
+  const players = snapshot.players ?? [];
+  const rows = [['🪵 Madeira', 'wood'], ['🪨 Pedra', 'stone'], ['🪙 Ouro', 'gold'], ['🍖 Comida', 'food']];
+  let html = '<table class="score-table"><thead><tr><th>Recursos</th>';
+  players.forEach((p, i) => {
+    const color = COLORS.tc[i] ?? '#d4a830';
+    const isMe = p.id === G.playerId;
+    html += `<th class="score-team" style="color:${color}">${escapeHtml((isMe ? '🛡 ' : '⚔ ') + (p.name || ('Equipe ' + (i + 1))))}</th>`;
+  });
+  html += '</tr></thead><tbody>';
+  for (const [label, key] of rows) {
+    html += `<tr><td>${label}</td>`;
+    for (const p of players) html += `<td>${Math.floor(p.resources?.[key] ?? 0)}</td>`;
+    html += '</tr>';
+  }
+  html += '</tbody></table>';
+  document.getElementById('result-scoreboard').innerHTML = html;
+  overlay.style.display = 'flex';
+}
+
+function hideResultScreen() {
+  document.getElementById('result-overlay').style.display = 'none';
 }
 
 function setLobbyStatus(msg) {
@@ -2891,6 +2954,9 @@ function setupMinimapInput() {
   // Zoom buttons
   document.getElementById('btn-zoom-in') ?.addEventListener('click', () => setZoom(G.zoom + G.zoomStep));
   document.getElementById('btn-zoom-out')?.addEventListener('click', () => setZoom(G.zoom - G.zoomStep));
+
+  // Restart match (shown on the end-of-match result screen)
+  document.getElementById('restart-btn')?.addEventListener('click', () => send({ type: 'restart_game' }));
 
   // Building bar buttons
   document.querySelectorAll('.build-btn').forEach(btn => {

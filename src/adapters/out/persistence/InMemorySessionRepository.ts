@@ -25,4 +25,18 @@ export class InMemorySessionRepository implements ISessionRepository {
   save(session: GameSession): void {
     this.sessions.set(session.id, session);
   }
+
+  resetDefault(): GameSession {
+    const old = this.sessions.get(DEFAULT_SESSION_ID);
+    // Preserva os jogadores conectados (id, nome) na mesma ordem de entrada.
+    const playerInfos = old ? old.players.map(p => ({ id: p.id, name: p.name })) : [];
+
+    const map = MapGeneratorService.generate(60, 60);
+    const session = new GameSession(DEFAULT_SESSION_ID, map.tiles, map.resourceNodes);
+    for (const p of playerInfos) session.addPlayer(p.id, p.name);
+
+    this.sessions.set(DEFAULT_SESSION_ID, session);
+    console.log(`[Mapa] Recriado para nova partida (${playerInfos.length} jogadores)`);
+    return session;
+  }
 }

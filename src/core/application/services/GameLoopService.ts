@@ -39,5 +39,8 @@ export class GameLoopService {
 
     const snapshot = session.toStateSnapshot();
     this.eventPublisher.publishStateSnapshot(session.id, snapshot);
+
+    // Partida encerrada: congela a velocidade do jogo (para de avançar ticks).
+    if (session.isGameOver) this.stop();
   }
 }

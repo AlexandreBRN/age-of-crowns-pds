@@ -56,6 +56,8 @@ export class GameSession {
   private readonly _resourceNodes: Map<string, ResourceNode> = new Map();
   private readonly _playerBuildings: Map<string, PlayerBuilding> = new Map();
   private _tick = 0;
+  private _gameOver = false;
+  private _winnerId: string | null = null;
 
   constructor(
     private readonly _id: string,
@@ -76,6 +78,8 @@ export class GameSession {
 
   get id(): string { return this._id; }
   get tick(): number { return this._tick; }
+  get isGameOver(): boolean { return this._gameOver; }
+  get winnerId(): string | null { return this._winnerId; }
   get mapTiles(): TileType[][] { return this._mapTiles; }
   get isFull(): boolean { return this._players.size >= 2; }
   get players(): PlayerData[] { return Array.from(this._players.values()); }
@@ -377,6 +381,9 @@ export class GameSession {
   }
 
   advanceTick(): void {
+    // Partida encerrada: tudo congelado, nenhuma ação é processada.
+    if (this._gameOver) return;
+
     this._tick++;
 
     // Bloqueio sensível ao dono: um Portão aliado abre passagem para as tropas do
@@ -471,6 +478,10 @@ export class GameSession {
       }
     }
 
+    // Uma Torre Principal foi destruída? Encerra a partida imediatamente,
+    // congelando o estado atual (sem mover/treinar/limpar entidades).
+    if (this._checkGameOver()) return;
+
     // ── Auto-attack idle combat units ────────────────────────────────────────
     for (const unit of this._villagers.values()) {
       if (unit.state !== 'idle' || unit.config.attackDamage === 0) continue;
@@ -539,10 +550,30 @@ export class GameSession {
     }
   }
 
+  /**
+   * Detecta destruição de uma Torre Principal. Define a partida como encerrada e
+   * o vencedor como o jogador cuja torre sobreviveu. Retorna true se encerrou.
+   */
+  private _checkGameOver(): boolean {
+    if (this._gameOver) return true;
+    let destroyedOwner: string | null = null;
+    for (const tc of this._townCenters.values()) {
+      if (tc.isDestroyed) { destroyedOwner = tc.ownerId; break; }
+    }
+    if (destroyedOwner === null) return false;
+    this._gameOver = true;
+    for (const p of this._players.values()) {
+      if (p.id !== destroyedOwner) { this._winnerId = p.id; break; }
+    }
+    return true;
+  }
+
   toStateSnapshot(): GameStateSnapshot {
     return {
       sessionId: this._id,
       tick: this._tick,
+      gameOver: this._gameOver,
+      winnerId: this._winnerId,
       players: Array.from(this._players.values()).map(p => ({
         id: p.id,
         name: p.name,

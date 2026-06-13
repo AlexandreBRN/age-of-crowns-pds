@@ -4,4 +4,6 @@ export interface ISessionRepository {
   findById(id: string): GameSession | undefined;
   findDefault(): GameSession;
   save(session: GameSession): void;
+  /** Recria a sessão padrão do zero (novo mapa, recursos e spawns), preservando os jogadores conectados. */
+  resetDefault(): GameSession;
 }

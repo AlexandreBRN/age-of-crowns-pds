@@ -70,6 +70,16 @@ export class WebSocketAdapter {
       return null;
     }
 
+    if (message.type === 'restart_game') {
+      this.handleRestart();
+      return null;
+    }
+
+    // Partida encerrada: nenhum novo comando é aceito até reiniciar.
+    if (this.sessionRepository.findDefault().isGameOver) {
+      return null;
+    }
+
     switch (message.type) {
       case 'move_villager':
         this.moveVillagerUseCase.execute({
@@ -152,6 +162,26 @@ export class WebSocketAdapter {
     }
 
     return null;
+  }
+
+  /**
+   * Reinicia a partida do zero: recria o mapa, recursos, construções e unidades,
+   * preservando os jogadores conectados. Religa o loop e envia o estado novo a todos.
+   */
+  private handleRestart(): void {
+    const session = this.sessionRepository.resetDefault();
+
+    // Reinicia o loop (estava parado após o fim da partida anterior).
+    this.gameLoopService.stop();
+    if (session.isFull) this.gameLoopService.start();
+
+    const clients = this.clientRegistry.get(session.id);
+    const payload = {
+      type: 'game_restarted',
+      mapTiles: session.mapTiles,
+      snapshot: session.toStateSnapshot(),
+    };
+    clients?.forEach((client) => this.publisher.sendTo(client, payload));
   }
 
   private handleJoin(ws: WebSocket, playerName: string): { playerId: string; sessionId: string } {

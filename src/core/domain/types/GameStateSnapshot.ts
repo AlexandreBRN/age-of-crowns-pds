@@ -60,6 +60,8 @@ export interface PlayerBuildingDTO {
 export interface GameStateSnapshot {
   sessionId: string;
   tick: number;
+  gameOver: boolean;
+  winnerId: string | null;            // jogador cuja Torre Principal sobreviveu (vencedor), ou null
   players: PlayerSnapshotDTO[];
   villagers: VillagerDTO[];
   townCenters: TownCenterDTO[];
