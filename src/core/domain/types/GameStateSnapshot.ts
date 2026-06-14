@@ -39,6 +39,8 @@ export interface PlayerSnapshotDTO {
   name: string;
   resources: { gold: number; wood: number; stone: number; food: number };
   era: number;
+  population: number;          // unidades atuais do jogador
+  populationMax: number;       // limite (Torre Principal + Casas)
 }
 
 export interface PlayerBuildingDTO {

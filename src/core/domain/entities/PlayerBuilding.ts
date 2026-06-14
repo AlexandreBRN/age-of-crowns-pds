@@ -2,6 +2,7 @@ export type PlayerBuildingType =
   | 'wall'
   | 'gate'
   | 'watchtower'
+  | 'house'
   | 'lumber_camp'
   | 'gold_mine'
   | 'farm'
@@ -26,9 +27,13 @@ export interface BuildingConfig {
   maxHp: number;
   generates?: BuildingCost;
   occupantCapacity?: number;   // vagas de trabalhadores (construções de produção)
+  populationBonus?: number;    // quanto a Casa aumenta o limite de população (+X)
   visionRadius?: number;
   blocksMovement: boolean;
 }
+
+// Quanto cada Casa adiciona ao limite máximo de população (configurável).
+export const POPULATION_PER_HOUSE = 5;
 
 // Capacidade padrão de trabalhadores das construções de produção (mín. recomendado).
 export const PRODUCTION_OCCUPANT_CAPACITY = 3;
@@ -70,6 +75,16 @@ export const BUILDING_CONFIGS: Record<PlayerBuildingType, BuildingConfig> = {
     constructionTicks: 24,
     maxHp: 300,
     visionRadius: 8,
+    blocksMovement: true,
+  },
+  house: {
+    label: 'Casa',
+    description: 'Aumenta o limite máximo de população.',
+    width: 2, height: 2,
+    cost: { wood: 25 },
+    constructionTicks: 12,
+    maxHp: 150,
+    populationBonus: POPULATION_PER_HOUSE,
     blocksMovement: true,
   },
   lumber_camp: {

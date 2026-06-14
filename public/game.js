@@ -34,6 +34,7 @@ const BUILDING_DEFS = {
   wall:         { label:'Muro',           width:1, height:1, cost:{stone:2},           color:'#8a7060' },
   gate:         { label:'Portão',         width:1, height:1, cost:{wood:10,stone:5},   color:'#7a5a30' },
   watchtower:   { label:'Torre de Vigia', width:1, height:1, cost:{stone:20,wood:10},   color:'#b09070' },
+  house:        { label:'Casa',           width:2, height:2, cost:{wood:25},            color:'#9a6a3a' },
   lumber_camp:  { label:'Serraria',       width:2, height:2, cost:{wood:30,stone:5},    color:'#5a7030' },
   gold_mine:    { label:'Mina de Ouro',   width:2, height:2, cost:{stone:40,wood:20},   color:'#c09020' },
   farm:         { label:'Fazenda',        width:2, height:2, cost:{wood:25},            color:'#88a030' },
@@ -1669,6 +1670,26 @@ function renderPlayerBuilding(snapshot, b) {
       break;
     }
 
+    case 'house': {
+      corners = draw3DBox(b.x, b.y, w, h, 34, {
+        wallRight: '#b58a5a',
+        wallLeft:  '#7a5836',
+        roof:      '#8a3a28',
+        outline,
+      });
+      // Pitched roof ridge + a little door
+      const rcx = (corners.tR.sx + corners.bR.sx) / 2;
+      const rcy = (corners.tR.sy + corners.bR.sy) / 2;
+      ctx.strokeStyle = '#5a261a'; ctx.lineWidth = 2;
+      ctx.beginPath(); ctx.moveTo(corners.tR.sx, corners.tR.sy); ctx.lineTo(corners.bR.sx, corners.bR.sy); ctx.stroke();
+      ctx.fillStyle = '#c9a060';
+      ctx.beginPath(); ctx.arc(rcx, rcy, 3, 0, Math.PI * 2); ctx.fill();
+      ctx.fillStyle = playerColor;
+      ctx.fillRect(corners.rR.sx - 6, corners.rR.sy - 3, 5, 7);
+      topAnchor = corners.tR;
+      break;
+    }
+
     case 'lumber_camp': {
       corners = draw3DBox(b.x, b.y, w, h, 28, {
         wallRight: '#6a4a28',
@@ -2710,9 +2731,19 @@ function updateHUD() {
   const training = myTc?.isTraining ?? false;
   const r = me.resources;
 
-  document.getElementById('btn-train').disabled         = training || r.food < 50;
-  document.getElementById('btn-train-archer').disabled  = training || r.food < 50 || r.wood < 30;
-  document.getElementById('btn-train-cavalry').disabled = training || r.food < 80 || r.gold < 50;
+  // Population: "população: 15 / 30" — bloqueia treino ao atingir o limite.
+  const pop = me.population ?? 0;
+  const popMax = me.populationMax ?? 0;
+  const popFull = pop >= popMax;
+  const popEl = document.getElementById('hud-pop');
+  if (popEl) {
+    popEl.textContent = `${pop} / ${popMax}`;
+    popEl.style.color = popFull ? '#ff6a5a' : '#ffe080';
+  }
+
+  document.getElementById('btn-train').disabled         = training || popFull || r.food < 50;
+  document.getElementById('btn-train-archer').disabled  = training || popFull || r.food < 50 || r.wood < 30;
+  document.getElementById('btn-train-cavalry').disabled = training || popFull || r.food < 80 || r.gold < 50;
 
   // Era HUD + advance-era button
   const era = me.era ?? 1;

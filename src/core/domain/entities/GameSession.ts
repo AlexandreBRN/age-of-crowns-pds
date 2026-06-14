@@ -49,6 +49,10 @@ const SPAWN_CONFIGS = [
 const GATHER_INTERVAL_TICKS = 4;
 const BUILDING_GEN_INTERVAL_TICKS = 8;
 
+// População inicial fornecida pela Torre Principal e teto absoluto de população.
+const BASE_POPULATION = 10;
+const POPULATION_HARD_CAP = 200;
+
 export class GameSession {
   private readonly _players: Map<string, PlayerData> = new Map();
   private readonly _villagers: Map<string, Villager> = new Map();
@@ -270,10 +274,15 @@ export class GameSession {
     const player = this._players.get(playerId);
     if (!player) throw new Error('Jogador não encontrado');
     const cfg = UNIT_CONFIGS[unitType];
+    // Conta a unidade em treino na população (não pode passar do limite).
+    const tc = this._getTownCenterOf(playerId);
+    const pending = tc.isTraining ? 1 : 0;
+    if (this.populationOf(playerId) + pending >= this.populationCapOf(playerId)) {
+      throw new Error('Limite de população atingido — construa uma Casa');
+    }
     if (!player.resources.canAfford(cfg.trainCost)) {
       throw new Error(`Recursos insuficientes para treinar ${cfg.label}`);
     }
-    const tc = this._getTownCenterOf(playerId);
     tc.startTraining(unitType, cfg.trainTicks);
     this._players.set(playerId, {
       ...player,
@@ -705,6 +714,29 @@ export class GameSession {
     return true;
   }
 
+  /** População atual = todas as unidades do jogador (no campo + dentro de construções). */
+  populationOf(playerId: string): number {
+    let count = 0;
+    for (const v of this._villagers.values()) if (v.ownerId === playerId) count++;
+    for (const list of this._garrisons.values()) for (const u of list) if (u.ownerId === playerId) count++;
+    for (const list of this._occupants.values()) for (const u of list) if (u.ownerId === playerId) count++;
+    return count;
+  }
+
+  /** Limite de população = base da Torre Principal + bônus das Casas concluídas. */
+  populationCapOf(playerId: string): number {
+    let cap = 0;
+    for (const tc of this._townCenters.values()) {
+      if (tc.ownerId === playerId && !tc.isDestroyed) cap += BASE_POPULATION;
+    }
+    for (const b of this._playerBuildings.values()) {
+      if (b.ownerId === playerId && b.type === 'house' && b.isComplete) {
+        cap += b.config.populationBonus ?? 0;
+      }
+    }
+    return Math.min(cap, POPULATION_HARD_CAP);
+  }
+
   toStateSnapshot(): GameStateSnapshot {
     return {
       sessionId: this._id,
@@ -716,6 +748,8 @@ export class GameSession {
         name: p.name,
         resources: p.resources.toJSON(),
         era: p.era,
+        population: this.populationOf(p.id),
+        populationMax: this.populationCapOf(p.id),
       })),
       villagers: Array.from(this._villagers.values()).map(v => v.toJSON()),
       townCenters: Array.from(this._townCenters.values()).map(tc => tc.toJSON()),
