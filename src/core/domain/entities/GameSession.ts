@@ -49,6 +49,18 @@ const SPAWN_CONFIGS = [
 const GATHER_INTERVAL_TICKS = 4;
 const BUILDING_GEN_INTERVAL_TICKS = 8;
 
+// ─────────────────────────────────────────────────────────────────────────────
+// DEV/TESTE — configuração TEMPORÁRIA para acelerar a validação de mecânicas.
+// A cada nova partida o jogador já começa com tropas prontas e recursos de sobra,
+// evitando ter de coletar/treinar do zero para testar construção, treino e combate.
+// NÃO faz parte do balanceamento final. Para desativar: troque DEV_FAST_START
+// para false (ou remova este bloco e a chamada a _applyDevFastStart em addPlayer).
+// ─────────────────────────────────────────────────────────────────────────────
+const DEV_FAST_START = true;
+const DEV_START_RESOURCES = 1000;     // de cada recurso (madeira, pedra, ouro, comida)
+const DEV_START_CAVALRY = 4;
+const DEV_START_ARCHERS = 4;
+
 // População inicial fornecida pela Torre Principal e teto absoluto de população.
 const BASE_POPULATION = 10;
 const POPULATION_HARD_CAP = 200;
@@ -122,6 +134,54 @@ export class GameSession {
       resources: Resources.initial(),
       era: 1,
     });
+
+    if (DEV_FAST_START) this._applyDevFastStart(playerId, spawn.tcAnchorX, spawn.tcAnchorY);
+  }
+
+  /**
+   * DEV/TESTE: dá recursos de sobra e tropas prontas ao jogador no início.
+   * Remova este método (e sua chamada em addPlayer) ao entrar em balanceamento.
+   */
+  private _applyDevFastStart(playerId: string, tcAnchorX: number, tcAnchorY: number): void {
+    const player = this._players.get(playerId);
+    if (player) {
+      this._players.set(playerId, {
+        ...player,
+        resources: new Resources(DEV_START_RESOURCES, DEV_START_RESOURCES, DEV_START_RESOURCES, DEV_START_RESOURCES),
+      });
+    }
+    const troops: UnitType[] = [
+      ...Array<UnitType>(DEV_START_CAVALRY).fill('cavalry'),
+      ...Array<UnitType>(DEV_START_ARCHERS).fill('archer'),
+    ];
+    const spots = this._freeSpawnTilesNear(tcAnchorX, tcAnchorY, troops.length);
+    troops.forEach((type, i) => {
+      const pos = spots[i];
+      if (!pos) return;
+      const v = new Villager(VillagerId.generate(), playerId, pos.x, pos.y, type);
+      this._villagers.set(v.id.value, v);
+    });
+  }
+
+  /** Coleta tiles livres ao redor da Torre Principal (para o spawn de teste). */
+  private _freeSpawnTilesNear(ax: number, ay: number, count: number): { x: number; y: number }[] {
+    const result: { x: number; y: number }[] = [];
+    const occupied = new Set(Array.from(this._villagers.values()).map(v => `${Math.round(v.x)},${Math.round(v.y)}`));
+    const cx = ax + 1, cy = ay + 1; // centro do TC 3×3
+    for (let r = 1; r <= 10 && result.length < count; r++) {
+      for (let dy = -r; dy <= r && result.length < count; dy++) {
+        for (let dx = -r; dx <= r && result.length < count; dx++) {
+          if (Math.max(Math.abs(dx), Math.abs(dy)) !== r) continue; // só o anel externo
+          const x = cx + dx, y = cy + dy;
+          const key = `${x},${y}`;
+          if (occupied.has(key)) continue;
+          if (!this._isTileWalkable(x, y) || this._isTileOccupiedByBuilding(x, y)) continue;
+          occupied.add(key);
+          result.push({ x, y });
+        }
+      }
+    }
+    return result;
   }
 
   commandAdvanceEra(playerId: string): void {
