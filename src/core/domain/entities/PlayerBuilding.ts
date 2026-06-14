@@ -113,14 +113,14 @@ export const BUILDING_CONFIGS: Record<PlayerBuildingType, BuildingConfig> = {
   },
   farm: {
     label: 'Fazenda',
-    description: 'Gera comida enquanto houver aldeões trabalhando dentro.',
-    width: 2, height: 2,
-    cost: { wood: 25 },
+    description: 'Moinho central cercado por 8 lavouras — até 8 aldeões trabalham visíveis.',
+    width: 3, height: 3,
+    cost: { wood: 40 },
     constructionTicks: 16,
-    maxHp: 150,
-    generates: { food: 8 },
-    occupantCapacity: PRODUCTION_OCCUPANT_CAPACITY,
-    blocksMovement: true,
+    maxHp: 200,
+    generates: { food: 4 },
+    occupantCapacity: 8,        // 8 quadrados de plantação ao redor do moinho
+    blocksMovement: false,      // aldeões ficam nas lavouras (tiles andáveis)
   },
   stone_quarry: {
     label: 'Pedreira',

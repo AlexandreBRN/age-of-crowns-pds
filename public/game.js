@@ -25,9 +25,11 @@ function worldExtent() {
   return { w: total * TILE_W / 2, h: total * TILE_H / 2 };
 }
 
-const VISION_VILLAGER    = 5;   // tiles
-const VISION_TOWN_CENTER = 9;   // tiles
-const VISION_WATCHTOWER  = 8;   // tiles
+// Raio de visão (tiles) por tipo de unidade — arqueiros enxergam mais longe.
+const VISION_UNIT = { villager: 8, cavalry: 10, archer: 13 };
+const visionForUnit = (v) => VISION_UNIT[v.unitType] ?? VISION_UNIT.villager;
+const VISION_TOWN_CENTER = 10;  // tiles
+const VISION_WATCHTOWER  = 9;   // tiles
 
 // Client-side building definitions (mirrors server BUILDING_CONFIGS)
 const BUILDING_DEFS = {
@@ -37,7 +39,7 @@ const BUILDING_DEFS = {
   house:        { label:'Casa',           width:2, height:2, cost:{wood:25},            color:'#9a6a3a' },
   lumber_camp:  { label:'Serraria',       width:2, height:2, cost:{wood:30,stone:5},    color:'#5a7030' },
   gold_mine:    { label:'Mina de Ouro',   width:2, height:2, cost:{stone:40,wood:20},   color:'#c09020' },
-  farm:         { label:'Fazenda',        width:2, height:2, cost:{wood:25},            color:'#88a030' },
+  farm:         { label:'Fazenda',        width:3, height:3, cost:{wood:40},            color:'#88a030' },
   stone_quarry: { label:'Pedreira',       width:2, height:2, cost:{wood:30,stone:10},   color:'#808080' },
 };
 
@@ -205,6 +207,7 @@ const G = {
   // Building placement
   placingBuildingType: null,  // string key from BUILDING_DEFS, or null
   selectedBuildingId: null,   // id of an own building selected for inspection (HP bar), or null
+  groupDest: null,            // { x, y } — single shared destination of a multi-unit move, or null
   resultShown: false,         // end-of-match overlay already built (avoids per-tick rebuild)
   wallStart: null,            // { tx, ty } — first tile of a wall drag, or null
   ghostTile: null,            // { tx, ty } — current cursor tile
@@ -555,6 +558,7 @@ function spriteForUnit(v) {
   // Direction tracking (shared across animations) — updated while moving, including
   // while approaching an attack target (out of range), so the unit faces where it walks.
   const approaching = v.state === 'attacking' && !v.attackInRange;
+  const firing = v.state === 'attacking' && v.attackInRange;
   const moving = (v.state === 'moving' && v.moveTarget) || approaching;
   let dirKey = null;
   if (moving) {
@@ -567,6 +571,15 @@ function spriteForUnit(v) {
       dirKey = directionForMove(v.moveTarget.x - cur.x, v.moveTarget.y - cur.y);
     }
     if (dirKey) G.villagerDir.set(v.id, dirKey);
+  } else if (firing) {
+    // Ao atacar, a unidade SEMPRE se vira para o alvo antes de disparar
+    // (evita o arqueiro atirar olhando para uma direção aleatória).
+    const tp = attackTargetWorldPos(v);
+    if (tp) {
+      const cur = v.subPosition ?? v.position;
+      dirKey = directionForMove(tp.x - cur.x, tp.y - cur.y);
+      if (dirKey) G.villagerDir.set(v.id, dirKey);
+    }
   }
   if (!dirKey) dirKey = G.villagerDir.get(v.id) || '5';
 
@@ -701,6 +714,45 @@ function handleMessage(msg) {
   }
 }
 
+// Single route line for a multi-unit selection: one line from the group's center
+// to the single shared destination point (no per-unit lines).
+function renderGroupMoveLine() {
+  if (!G.snapshot || G.selectedIds.size <= 1 || !G.groupDest) return;
+  const ctx = G.ctx;
+  let sx = 0, sy = 0, n = 0, anyMoving = false;
+  for (const id of G.selectedIds) {
+    const v = G.snapshot.villagers.find(x => x.id === id);
+    if (!v) continue;
+    const p = v.subPosition ?? v.position;
+    sx += p.x; sy += p.y; n++;
+    if (v.state === 'moving') anyMoving = true;
+  }
+  if (n === 0 || !anyMoving) { G.groupDest = null; return; } // grupo chegou → some a linha
+
+  const from = worldToScreen(sx / n, sy / n);
+  const to = worldToScreen(G.groupDest.x, G.groupDest.y);
+  ctx.save();
+  ctx.strokeStyle = COLORS.moveTarget;
+  ctx.lineWidth = 2.5;
+  ctx.setLineDash([6, 5]);
+  ctx.beginPath();
+  ctx.moveTo(from.sx, from.sy + TILE_H / 2);
+  ctx.lineTo(to.sx, to.sy + TILE_H / 2);
+  ctx.stroke();
+  ctx.setLineDash([]);
+  // Único ponto de destino
+  ctx.strokeStyle = COLORS.selected;
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.arc(to.sx, to.sy + TILE_H / 2, 7, 0, Math.PI * 2);
+  ctx.stroke();
+  ctx.fillStyle = 'rgba(240,208,64,0.5)';
+  ctx.beginPath();
+  ctx.arc(to.sx, to.sy + TILE_H / 2, 3, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.restore();
+}
+
 // ─── Fog of War ───────────────────────────────────────────────────────────────
 function revealAroundBases() {
   if (!G.snapshot || !G.playerId) return;
@@ -710,7 +762,7 @@ function revealAroundBases() {
   }
   for (const v of G.snapshot.villagers) {
     if (v.ownerId !== G.playerId) continue;
-    addVisionCircle(G.revealedTiles, v.position.x, v.position.y, VISION_VILLAGER);
+    addVisionCircle(G.revealedTiles, v.position.x, v.position.y, visionForUnit(v));
   }
 }
 
@@ -729,10 +781,10 @@ function updateFogOfWar() {
     addVisionCircle(newVisible, cx, cy, VISION_TOWN_CENTER, mw, mh);
   }
 
-  // Villagers
+  // Units (vision varies by type — archers see farthest)
   for (const v of G.snapshot.villagers) {
     if (v.ownerId !== G.playerId) continue;
-    addVisionCircle(newVisible, v.position.x, v.position.y, VISION_VILLAGER, mw, mh);
+    addVisionCircle(newVisible, v.position.x, v.position.y, visionForUnit(v), mw, mh);
   }
 
   // Watchtowers
@@ -839,6 +891,7 @@ function render() {
 
   renderTiles();
   if (snapshot) renderEntitiesSorted(snapshot);
+  renderGroupMoveLine();
   renderFog();
   renderBuildingGhost();
 
@@ -974,7 +1027,10 @@ function renderEntitiesSorted(snapshot) {
     }
     if (!isOwn && !isTileRevealed(b.x, b.y)) continue;
     if (!isTileInView(b.x + (b.width - 1) / 2, b.y + (b.height - 1) / 2, TILE_W * 2)) continue;
-    list.push({ kind: 'building', payload: b, depth: b.x + (b.width - 1) + b.y + (b.height - 1) });
+    // Fazenda: ordena pela quina de trás para ser desenhada ANTES dos aldeões que
+    // trabalham nas lavouras (assim eles ficam visíveis por cima).
+    const depth = b.type === 'farm' ? b.x + b.y : b.x + (b.width - 1) + b.y + (b.height - 1);
+    list.push({ kind: 'building', payload: b, depth });
   }
 
   for (const v of snapshot.villagers) {
@@ -1274,8 +1330,9 @@ function renderVillager(snapshot, v) {
   const playerIdx  = snapshot.players.findIndex(p => p.id === v.ownerId);
 
 
-  // Movement path line (target → iso)
-  if (isSelected && v.state === 'moving' && v.moveTarget) {
+  // Movement path line (target → iso). For groups (2+ selected) we draw a single
+  // group route line instead (renderGroupMoveLine), not one line per unit.
+  if (isSelected && G.selectedIds.size === 1 && v.state === 'moving' && v.moveTarget) {
     const t = worldToScreen(v.moveTarget.x, v.moveTarget.y);
     ctx.strokeStyle = COLORS.moveTarget;
     ctx.lineWidth = 2;
@@ -1762,31 +1819,34 @@ function renderPlayerBuilding(snapshot, b) {
     }
 
     case 'farm': {
-      // Almost flat — short walls, crop rows visible on the diamond roof
-      corners = draw3DBox(b.x, b.y, w, h, 6, {
-        wallRight: '#5a4020',
-        wallLeft:  '#3a2810',
-        roof:      '#6a8020',
-        outline,
-      });
-      // Crop rows on the diamond roof — three lines parallel to the (x) axis in iso
-      const cT = corners.tR, cR = corners.rR, cB = corners.bR, cL = corners.lR;
-      ctx.strokeStyle = '#a0c040';
-      ctx.lineWidth = 2;
-      for (let i = 1; i <= 3; i++) {
-        const t = i / 4;
-        // Line from edge top→left at fraction t to edge right→bottom at fraction t
-        const ax = cT.sx + (cL.sx - cT.sx) * t;
-        const ay = cT.sy + (cL.sy - cT.sy) * t;
-        const bx = cR.sx + (cB.sx - cR.sx) * t;
-        const by = cR.sy + (cB.sy - cR.sy) * t;
-        ctx.beginPath();
-        ctx.moveTo(ax, ay);
-        ctx.lineTo(bx, by);
-        ctx.stroke();
+      // Complexo agrícola 3×3: moinho central cercado por 8 lavouras (onde os
+      // aldeões ficam visíveis trabalhando). Desenha as lavouras e depois o moinho.
+      for (let dy = 0; dy < 3; dy++) {
+        for (let dx = 0; dx < 3; dx++) {
+          if (dx === 1 && dy === 1) continue; // o centro é o moinho
+          const tx = b.x + dx, ty = b.y + dy;
+          const t = worldToScreen(tx, ty), r = worldToScreen(tx + 1, ty);
+          const bo = worldToScreen(tx + 1, ty + 1), l = worldToScreen(tx, ty + 1);
+          ctx.beginPath();
+          ctx.moveTo(t.sx, t.sy); ctx.lineTo(r.sx, r.sy); ctx.lineTo(bo.sx, bo.sy); ctx.lineTo(l.sx, l.sy); ctx.closePath();
+          ctx.fillStyle = '#6a8020'; ctx.fill();
+          ctx.strokeStyle = '#46591a'; ctx.lineWidth = 1; ctx.stroke();
+          // sulcos de plantação
+          ctx.strokeStyle = '#9bc04a';
+          for (let i = 1; i <= 2; i++) {
+            const f = i / 3;
+            const ax = t.sx + (l.sx - t.sx) * f, ay = t.sy + (l.sy - t.sy) * f;
+            const bx = r.sx + (bo.sx - r.sx) * f, by = r.sy + (bo.sy - r.sy) * f;
+            ctx.beginPath(); ctx.moveTo(ax, ay); ctx.lineTo(bx, by); ctx.stroke();
+          }
+        }
       }
+      // Moinho no tile central
+      corners = draw3DBox(b.x + 1, b.y + 1, 1, 1, 44, {
+        wallRight: '#a8804a', wallLeft: '#6e4f28', roof: '#caa050', outline,
+      });
       ctx.fillStyle = playerColor;
-      ctx.fillRect(corners.rR.sx - 5, corners.rR.sy - 3, 5, 6);
+      ctx.fillRect(corners.rR.sx - 6, corners.rR.sy - 3, 6, 8);
       topAnchor = corners.tR;
       break;
     }
@@ -2335,6 +2395,24 @@ function ownBuildingAt(tx, ty) {
   return null;
 }
 
+// World position of a unit's current attack target (for facing it while firing).
+function attackTargetWorldPos(v) {
+  if (!v.attackTargetId || !G.snapshot) return null;
+  if (v.attackTargetKind === 'unit') {
+    const t = G.snapshot.villagers.find(x => x.id === v.attackTargetId);
+    return t ? (t.subPosition ?? t.position) : null;
+  }
+  if (v.attackTargetKind === 'building') {
+    const b = (G.snapshot.playerBuildings ?? []).find(x => x.id === v.attackTargetId);
+    return b ? { x: b.x + (b.width ?? 1) / 2, y: b.y + (b.height ?? 1) / 2 } : null;
+  }
+  if (v.attackTargetKind === 'town_center') {
+    const tc = G.snapshot.townCenters.find(x => x.id === v.attackTargetId);
+    return tc ? { x: tc.anchorPosition.x + 1.5, y: tc.anchorPosition.y + 1.5 } : null;
+  }
+  return null;
+}
+
 // Own completed watchtower at tile — target for garrisoning archers.
 function ownWatchtowerAt(tx, ty) {
   for (const b of G.snapshot?.playerBuildings ?? []) {
@@ -2432,31 +2510,57 @@ function formationOffsets(count) {
   return out.slice(0, count);
 }
 
-// Issue move commands to every selected unit so they end up forming a grid
-// around (tx, ty). The unit closest to the target gets the center slot.
-function moveSelectedToFormation(tx, ty) {
-  if (!G.snapshot) return;
-  const ids = [...G.selectedIds];
-  if (ids.length === 0) return;
-  if (ids.length === 1) {
-    send({ type: 'move_villager', villagerId: ids[0], destination: { x: tx, y: ty } });
-    return;
-  }
-  const units = ids
-    .map(id => G.snapshot.villagers.find(v => v.id === id))
-    .filter(Boolean);
-  // Closest unit to the target goes to the center slot of the formation.
+// Move a single formation block (grid around ax,ay; nearest unit gets the center).
+function assignFormationBlock(units, ax, ay) {
+  if (units.length === 0) return;
   units.sort((a, b) =>
-    (Math.abs(a.position.x - tx) + Math.abs(a.position.y - ty)) -
-    (Math.abs(b.position.x - tx) + Math.abs(b.position.y - ty)));
+    (Math.abs(a.position.x - ax) + Math.abs(a.position.y - ay)) -
+    (Math.abs(b.position.x - ax) + Math.abs(b.position.y - ay)));
   const offsets = formationOffsets(units.length);
   for (let i = 0; i < units.length; i++) {
     send({
       type: 'move_villager',
       villagerId: units[i].id,
-      destination: { x: tx + offsets[i].x, y: ty + offsets[i].y },
+      destination: { x: ax + offsets[i].x, y: ay + offsets[i].y },
     });
   }
+}
+
+// Move the selected group toward (tx, ty). Mixed groups auto-organize by role:
+// cavalry take the front (at the chosen point, leading toward the enemy) and
+// archers stay a safe distance behind. The clicked point is only a reference.
+function moveSelectedToFormation(tx, ty) {
+  if (!G.snapshot) return;
+  const ids = [...G.selectedIds];
+  if (ids.length === 0) return;
+  if (ids.length === 1) {
+    G.groupDest = null;
+    send({ type: 'move_villager', villagerId: ids[0], destination: { x: tx, y: ty } });
+    return;
+  }
+  const units = ids.map(id => G.snapshot.villagers.find(v => v.id === id)).filter(Boolean);
+  if (units.length === 0) return;
+
+  G.groupDest = { x: tx, y: ty }; // único ponto de destino do grupo
+
+  // Direção de avanço (centroide do grupo → destino) define a frente da formação.
+  let cx = 0, cy = 0;
+  for (const u of units) { cx += u.position.x; cy += u.position.y; }
+  cx /= units.length; cy /= units.length;
+  const fdx = tx - cx, fdy = ty - cy;
+  const len = Math.hypot(fdx, fdy);
+  const fwd = len > 0.5 ? { x: fdx / len, y: fdy / len } : { x: 0, y: 1 };
+
+  const cavalry = units.filter(u => u.unitType === 'cavalry');
+  const rear    = units.filter(u => u.unitType !== 'cavalry'); // arqueiros + aldeões
+  const split = cavalry.length > 0 && rear.length > 0;
+  const GAP = 3; // distância segura: arqueiros recuados atrás dos cavaleiros
+
+  // Cavaleiros à frente (no ponto de referência); arqueiros recuam ao longo de -fwd.
+  assignFormationBlock(cavalry, tx, ty);
+  const bx = split ? tx - Math.round(fwd.x * GAP) : tx;
+  const by = split ? ty - Math.round(fwd.y * GAP) : ty;
+  assignFormationBlock(rear, bx, by);
 }
 
 // ─── Input ────────────────────────────────────────────────────────────────────
@@ -2517,6 +2621,7 @@ function setupInput() {
       const bottom = Math.max(a.y, b.y);
       if (!e.shiftKey) G.selectedIds.clear();
       G.selectedBuildingId = null;
+      G.groupDest = null;
       for (const v of G.snapshot?.villagers ?? []) {
         if (v.ownerId !== G.playerId) continue;
         const p = villagerScreenXY(v);
@@ -2595,6 +2700,7 @@ function setupInput() {
     }
 
     const v = villagerAtTile(tx, ty);
+    G.groupDest = null;   // mudança de seleção → some a linha de rota do grupo anterior
     if (v) {
       if (!e.shiftKey) G.selectedIds.clear();
       G.selectedIds.add(v.id);

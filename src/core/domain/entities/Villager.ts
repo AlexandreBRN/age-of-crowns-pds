@@ -87,6 +87,8 @@ export class Villager {
   private _attackTargetKind: AttackTargetKind | null = null;
   // Construção para a qual a unidade está indo entrar (torre/produção). Entra ao chegar.
   private _pendingEnterBuildingId: string | null = null;
+  // Fazenda na qual o aldeão está trabalhando (fica VISÍVEL na lavoura, ≠ produção interna).
+  private _farmTargetId: string | null = null;
   // Alvo final ordenado pelo jogador. O alvo "atual" acima pode passar a ser um
   // obstáculo (muro/portão) no caminho; o final é retomado quando o obstáculo cai.
   private _attackGoalId: string | null = null;
@@ -162,6 +164,7 @@ export class Villager {
     this._attackTargetId = null;
     this._attackTargetKind = null;
     this._pendingEnterBuildingId = null;
+    this._farmTargetId = null;
     this._gatherTickCounter = 0;
     this._state = 'moving';
   }
@@ -178,6 +181,7 @@ export class Villager {
     this._attackTargetId = null;
     this._attackTargetKind = null;
     this._pendingEnterBuildingId = null;
+    this._farmTargetId = null;
     this._gatherTickCounter = 0;
     this._state = 'moving';
   }
@@ -204,6 +208,7 @@ export class Villager {
     this._attackTargetId = null;
     this._attackTargetKind = null;
     this._pendingEnterBuildingId = null;
+    this._farmTargetId = null;
     this._gatherTickCounter = 0;
     this._state = 'moving';
   }
@@ -215,6 +220,18 @@ export class Villager {
   // ── Entrada em construção (guarnição de torre / ocupação de produção) ────────
   get pendingEnterBuildingId(): string | null { return this._pendingEnterBuildingId; }
   clearPendingEnter(): void { this._pendingEnterBuildingId = null; }
+  get farmTargetId(): string | null { return this._farmTargetId; }
+
+  /** Começa a trabalhar na lavoura: fica parado no quadrado, visível, animando coleta. */
+  startFarming(farmId: string): void {
+    this._farmTargetId = farmId;
+    this._pendingEnterBuildingId = null;
+    this._moveTargetX = null;
+    this._moveTargetY = null;
+    this._path = [];
+    this._gatherTargetId = null;
+    this._state = 'gathering';
+  }
 
   /** Caminha até a construção para entrar nela ao chegar. */
   commandEnterBuilding(buildingId: string, destX: number, destY: number): void {
@@ -239,6 +256,7 @@ export class Villager {
     this._constructTargetId = null;
     this._constructQueue = [];
     this._pendingEnterBuildingId = null;
+    this._farmTargetId = null;
     this._moveTargetX = null;
     this._moveTargetY = null;
     this._path = [];
@@ -274,6 +292,7 @@ export class Villager {
     this._constructTargetId = null;
     this._constructQueue = [];
     this._pendingEnterBuildingId = null;
+    this._farmTargetId = null;
     this._attackTargetId = null;
     this._attackTargetKind = null;
     this._attackGoalId = null;
@@ -299,6 +318,7 @@ export class Villager {
     this._constructTargetId = null;
     this._constructQueue = [];
     this._pendingEnterBuildingId = null;
+    this._farmTargetId = null;
     this._attackTargetId = null;
     this._attackTargetKind = null;
     this._attackGoalId = null;

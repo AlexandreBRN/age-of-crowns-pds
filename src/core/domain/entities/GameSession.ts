@@ -311,6 +311,19 @@ export class GameSession {
     if (!building || !building.isProduction) throw new Error('Esta construção não produz recursos');
     if (building.ownerId !== playerId) throw new Error('Construção não é sua');
     if (!building.isComplete) throw new Error('A construção ainda está em obras');
+
+    if (building.type === 'farm') {
+      // Fazenda: o aldeão vai até um quadrado de plantação livre e fica trabalhando lá (visível).
+      if (this._farmReservedCount(buildingId) >= building.occupantCapacity) {
+        throw new Error('A Fazenda está cheia');
+      }
+      const square = this._freeFarmSquare(building);
+      if (!square) throw new Error('A Fazenda está cheia');
+      villager.commandEnterBuilding(buildingId, square.x, square.y);
+      return;
+    }
+
+    // Demais construções de produção: o aldeão entra (some do mapa).
     if ((this._occupants.get(buildingId)?.length ?? 0) >= building.occupantCapacity) {
       throw new Error('A construção está cheia');
     }
@@ -319,12 +332,17 @@ export class GameSession {
     villager.commandEnterBuilding(buildingId, dest.x, dest.y);
   }
 
-  /** Remove todos os aldeões que trabalham dentro de uma construção. */
+  /** Remove todos os aldeões que trabalham em uma construção (saem/voltam a obedecer). */
   commandVacateBuilding(playerId: string, buildingId: string): void {
     const building = this._playerBuildings.get(buildingId);
     if (!building) throw new Error('Construção não encontrada');
     if (building.ownerId !== playerId) throw new Error('Construção não é sua');
-    this._ejectFrom(this._occupants, buildingId);
+    if (building.type === 'farm') {
+      // Aldeões da Fazenda ficam ociosos onde estão (continuam visíveis na lavoura).
+      for (const v of this._villagers.values()) if (v.farmTargetId === buildingId) v.commandIdle();
+    } else {
+      this._ejectFrom(this._occupants, buildingId);
+    }
   }
 
   commandVillagerAttack(villagerId: string, targetId: string, targetKind: AttackTargetKind): void {
@@ -599,10 +617,9 @@ export class GameSession {
       }
       if (!targetPos) { attacker.setIdle(); continue; } // alvo final também sumiu
 
-      const dist = Math.max(
-        Math.abs(attacker.x - targetPos.x),
-        Math.abs(attacker.y - targetPos.y),
-      );
+      // Distância até o TILE mais próximo do alvo (não o centro). Assim o atacante
+      // para na borda da construção em vez de entrar nela e ficar preso.
+      const dist = this._distToTarget(attacker.x, attacker.y, curId, curKind);
 
       const inRange = dist <= cfg.attackRange;
       attacker.setAttackInRange(inRange);
@@ -657,25 +674,33 @@ export class GameSession {
       if (enemy) unit.commandAttack(enemy.id, enemy.kind);
     }
 
-    // ── Entrada em construções: quem chegou entra (torre→guarnição, produção→trabalho) ─
-    const toEnter: Villager[] = [];
+    // ── Chegada em construções: torre→guarnição, Fazenda→lavoura (visível), demais→entra ─
+    const toEnter: Villager[] = [];   // entra na construção (some do mapa)
+    const toFarm: Villager[] = [];    // fica trabalhando na lavoura (visível)
     for (const v of this._villagers.values()) {
       if (!v.pendingEnterBuildingId || v.state === 'moving') continue;
       const b = this._playerBuildings.get(v.pendingEnterBuildingId);
       const adjacent = !!b && b.occupiedTiles.some(t =>
         Math.max(Math.abs(t.x - v.x), Math.abs(t.y - v.y)) <= 1);
-      let ok = false;
       if (b && b.isComplete && adjacent) {
-        if (b.type === 'watchtower' && v.unitType === 'archer') {
-          ok = (this._garrisons.get(b.id)?.length ?? 0) < TOWER_GARRISON_MAX;
-        } else if (b.isProduction && v.unitType === 'villager') {
-          ok = (this._occupants.get(b.id)?.length ?? 0) < b.occupantCapacity;
+        if (b.type === 'watchtower' && v.unitType === 'archer'
+            && (this._garrisons.get(b.id)?.length ?? 0) < TOWER_GARRISON_MAX) {
+          toEnter.push(v);
+        } else if (b.type === 'farm' && v.unitType === 'villager'
+            && this._farmWorkerCount(b.id) < b.occupantCapacity) {
+          toFarm.push(v);
+        } else if (b.isProduction && v.unitType === 'villager'
+            && (this._occupants.get(b.id)?.length ?? 0) < b.occupantCapacity) {
+          toEnter.push(v);
+        } else {
+          v.clearPendingEnter();
         }
+      } else {
+        v.clearPendingEnter(); // destruída/incompatível ou inalcançável
       }
-      if (ok) toEnter.push(v);
-      else v.clearPendingEnter(); // cheia/destruída/incompatível ou inalcançável
     }
     for (const v of toEnter) this._enterBuilding(v);
+    for (const v of toFarm) v.startFarming(v.pendingEnterBuildingId!);
 
     // ── Combate das torres guarnecidas (atira N flechas = N arqueiros) ─────────
     const archerCfg = UNIT_CONFIGS.archer;
@@ -719,7 +744,7 @@ export class GameSession {
     if (this._tick % BUILDING_GEN_INTERVAL_TICKS === 0) {
       for (const building of this._playerBuildings.values()) {
         if (!building.isComplete || !building.isProduction) continue;
-        const occupants = this._occupants.get(building.id)?.length ?? 0;
+        const occupants = this._occupantCount(building);
         if (occupants === 0) continue; // sem trabalhadores → produção parada
         const gen = building.config.generates!;
         const player = this._players.get(building.ownerId);
@@ -758,9 +783,12 @@ export class GameSession {
     }
     for (const [id, b] of this._playerBuildings) {
       if (b.isDestroyed) {
-        // Construção destruída: ejeta quem estiver dentro antes de remover.
+        // Construção destruída: libera quem estiver dentro/trabalhando antes de remover.
         if (this._garrisons.has(id)) this._ejectFrom(this._garrisons, id);
         if (this._occupants.has(id)) this._ejectFrom(this._occupants, id);
+        if (b.type === 'farm') {
+          for (const v of this._villagers.values()) if (v.farmTargetId === id) v.commandIdle();
+        }
         this._playerBuildings.delete(id);
       }
     }
@@ -832,7 +860,7 @@ export class GameSession {
       playerBuildings: Array.from(this._playerBuildings.values()).map(b => {
         if (b.type === 'watchtower') return b.toJSON(this._garrisons.get(b.id)?.length);
         if (b.isProduction) {
-          const occupants = this._occupants.get(b.id)?.length ?? 0;
+          const occupants = this._occupantCount(b);
           return { ...b.toJSON(occupants), ...this._productionInfo(b, occupants) };
         }
         return b.toJSON();
@@ -1019,6 +1047,24 @@ export class GameSession {
     return null;
   }
 
+  /** Menor distância Chebyshev de (x,y) até qualquer tile ocupado pelo alvo. */
+  private _distToTarget(x: number, y: number, targetId: string, kind: AttackTargetKind): number {
+    if (kind === 'unit') {
+      const v = this._villagers.get(targetId);
+      return v ? Math.max(Math.abs(x - v.x), Math.abs(y - v.y)) : Infinity;
+    }
+    const tiles = kind === 'building'
+      ? this._playerBuildings.get(targetId)?.occupiedTiles
+      : this._townCenters.get(targetId)?.occupiedTiles;
+    if (!tiles || tiles.length === 0) return Infinity;
+    let min = Infinity;
+    for (const t of tiles) {
+      const d = Math.max(Math.abs(x - t.x), Math.abs(y - t.y));
+      if (d < min) min = d;
+    }
+    return min;
+  }
+
   private _applyDamage(targetId: string, kind: AttackTargetKind, amount: number): void {
     if (kind === 'unit') this._villagers.get(targetId)?.takeDamage(amount);
     else if (kind === 'building') this._playerBuildings.get(targetId)?.takeDamage(amount);
@@ -1037,14 +1083,12 @@ export class GameSession {
     }
     for (const b of this._playerBuildings.values()) {
       if (b.ownerId === unit.ownerId || !b.isComplete || b.isDestroyed) continue;
-      const bx = b.x + Math.floor(b.width / 2);
-      const by = b.y + Math.floor(b.height / 2);
-      const d = Math.max(Math.abs(bx - unit.x), Math.abs(by - unit.y));
+      const d = this._distToTarget(unit.x, unit.y, b.id, 'building'); // borda, não o centro
       if (d < bestDist) { bestDist = d; best = { id: b.id, kind: 'building' }; }
     }
     for (const tc of this._townCenters.values()) {
       if (tc.ownerId === unit.ownerId || tc.isDestroyed) continue;
-      const d = Math.max(Math.abs(tc.anchorX + 1 - unit.x), Math.abs(tc.anchorY + 1 - unit.y));
+      const d = this._distToTarget(unit.x, unit.y, tc.id, 'town_center');
       if (d < bestDist) { bestDist = d; best = { id: tc.id, kind: 'town_center' }; }
     }
 
@@ -1107,6 +1151,47 @@ export class GameSession {
     const list = map.get(buildingId) ?? [];
     list.push(unit);
     map.set(buildingId, list);
+  }
+
+  /** Trabalhadores de uma construção de produção (Fazenda conta aldeões visíveis nas lavouras). */
+  private _occupantCount(b: PlayerBuilding): number {
+    if (b.type === 'farm') return this._farmWorkerCount(b.id);
+    return this._occupants.get(b.id)?.length ?? 0;
+  }
+
+  /** Aldeões já trabalhando na lavoura (chegaram ao quadrado). */
+  private _farmWorkerCount(farmId: string): number {
+    let n = 0;
+    for (const v of this._villagers.values()) if (v.farmTargetId === farmId) n++;
+    return n;
+  }
+
+  /** Aldeões trabalhando + a caminho da lavoura (para checar capacidade/quadrados). */
+  private _farmReservedCount(farmId: string): number {
+    let n = 0;
+    for (const v of this._villagers.values()) {
+      if (v.farmTargetId === farmId || v.pendingEnterBuildingId === farmId) n++;
+    }
+    return n;
+  }
+
+  /** Um quadrado de plantação livre (perímetro do 3×3, exceto o moinho central). */
+  private _freeFarmSquare(farm: PlayerBuilding): { x: number; y: number } | null {
+    const taken = new Set<string>();
+    for (const v of this._villagers.values()) {
+      if (v.farmTargetId === farm.id) taken.add(`${Math.round(v.x)},${Math.round(v.y)}`);
+      else if (v.pendingEnterBuildingId === farm.id && v.moveTargetX !== null && v.moveTargetY !== null) {
+        taken.add(`${v.moveTargetX},${v.moveTargetY}`);
+      }
+    }
+    const millX = farm.x + 1, millY = farm.y + 1; // centro 3×3 = moinho
+    for (const t of farm.occupiedTiles) {
+      if (t.x === millX && t.y === millY) continue;        // pula o moinho
+      if (taken.has(`${t.x},${t.y}`)) continue;
+      if (!this._isTileWalkable(t.x, t.y)) continue;
+      return { x: t.x, y: t.y };
+    }
+    return null;
   }
 
   /** Tira todas as unidades de dentro de uma construção e as recoloca em volta. */
