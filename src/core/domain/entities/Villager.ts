@@ -53,6 +53,13 @@ export const UNIT_CONFIGS: Record<UnitType, UnitConfig> = {
   },
 };
 
+// Bônus de unidade por era (índice = era atual; era 1 = base). Aplicados de forma
+// multiplicativa sobre o valor base — usar a era atual evita acúmulo/dupla aplicação.
+export const ERA_UNIT_HP_MULT     = [1.0, 1.0, 1.25, 1.55];  // vida
+export const ERA_UNIT_DAMAGE_MULT = [1.0, 1.0, 1.30, 1.65];  // dano
+export const ERA_UNIT_SPEED_MULT  = [1.0, 1.0, 1.15, 1.30];  // velocidade de movimento
+export const ERA_UNIT_TRAIN_MULT  = [1.0, 1.0, 0.80, 0.65];  // tempo de treino (redução)
+
 export type VillagerState = 'idle' | 'moving' | 'gathering' | 'constructing' | 'attacking' | 'dying';
 
 // Ticks a unit lingers in 'dying' state before being cleaned up — gives the
@@ -87,6 +94,7 @@ export class Villager {
   private _attackTickCounter = 0;
   private _attackInRange = false; // true só quando o alvo está dentro do alcance de ataque
   private _dyingTickCounter = 0; // ticks spent in 'dying' state after hp <= 0
+  private _era = 1;               // era do dono — escala vida/dano/velocidade
 
   constructor(
     private readonly _id: VillagerId,
@@ -105,10 +113,24 @@ export class Villager {
   get x(): number { return this._x; }
   get y(): number { return this._y; }
   get hp(): number { return this._hp; }
-  get maxHp(): number { return UNIT_CONFIGS[this._unitType].maxHp; }
+  get maxHp(): number { return Math.floor(UNIT_CONFIGS[this._unitType].maxHp * ERA_UNIT_HP_MULT[this._era]); }
+  get attackDamage(): number { return Math.round(UNIT_CONFIGS[this._unitType].attackDamage * ERA_UNIT_DAMAGE_MULT[this._era]); }
+  get moveSpeedTiles(): number { return UNIT_CONFIGS[this._unitType].moveSpeedTiles * ERA_UNIT_SPEED_MULT[this._era]; }
+  get era(): number { return this._era; }
   get state(): VillagerState { return this._state; }
   get unitType(): UnitType { return this._unitType; }
   get config(): UnitConfig { return UNIT_CONFIGS[this._unitType]; }
+
+  /** Atualiza a era da unidade e aplica imediatamente o bônus de vida (sobe a vida
+   *  atual pelo ganho de máximo). Idempotente: usar a era absoluta evita bônus duplo. */
+  setEra(era: number): void {
+    if (era === this._era) return;
+    const oldMax = this.maxHp;
+    this._era = era;
+    const gain = this.maxHp - oldMax;
+    if (gain > 0) this._hp = Math.min(this.maxHp, this._hp + gain);
+    else this._hp = Math.min(this._hp, this.maxHp);
+  }
   get isDead(): boolean { return this._hp <= 0; }
   get isDying(): boolean { return this._state === 'dying'; }
   get shouldBeRemoved(): boolean { return this._state === 'dying' && this._dyingTickCounter >= DYING_LINGER_TICKS; }
@@ -348,7 +370,7 @@ export class Villager {
     // of diagonal tiles) while still preventing two different direction vectors
     // from being mixed inside the same tick (which would break the
     // axis-aligned animation guarantee at corners).
-    const speed = this.config.moveSpeedTiles;
+    const speed = this.moveSpeedTiles;
     let remaining = speed;
     let moved = false;
     let lastSegDx: number | null = null;

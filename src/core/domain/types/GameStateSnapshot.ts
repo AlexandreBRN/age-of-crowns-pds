@@ -63,6 +63,9 @@ export interface PlayerBuildingDTO {
   occupants?: number;                       // aldeões trabalhando dentro (construções de produção)
   occupantsMax?: number;                    // capacidade de trabalhadores
   producing?: boolean;                      // true se há ≥1 aldeão produzindo
+  prodResource?: 'gold' | 'wood' | 'stone' | 'food';  // recurso gerado
+  prodPerSec?: number;                      // taxa de produção atual (recursos/segundo)
+  efficiency?: number;                      // eficiência atual da produção (0..1)
 }
 
 export interface GameStateSnapshot {

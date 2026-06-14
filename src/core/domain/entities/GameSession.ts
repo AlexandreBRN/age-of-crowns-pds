@@ -1,5 +1,5 @@
 import { v4 as uuidv4 } from 'uuid';
-import { Villager, UnitType, UNIT_CONFIGS, AttackTargetKind } from './Villager';
+import { Villager, UnitType, UNIT_CONFIGS, AttackTargetKind, ERA_UNIT_TRAIN_MULT } from './Villager';
 import { TownCenter } from './TownCenter';
 import { ResourceNode, RESOURCE_YIELD } from './ResourceNode';
 import { PlayerBuilding, PlayerBuildingType, BUILDING_CONFIGS, BuildingCost, TOWER_GARRISON_MAX } from './PlayerBuilding';
@@ -128,16 +128,25 @@ export class GameSession {
     const player = this._players.get(playerId);
     if (!player) throw new Error('Jogador não encontrado');
     if (player.era >= MAX_ERA) throw new Error('Era máxima atingida');
-    const cost = ERA_UP_COSTS[player.era + 1];
+    // Custo para avançar A PARTIR da era atual (1→2 = índice 1, 2→3 = índice 2).
+    // Avança exatamente uma era por vez — não é possível pular etapas.
+    const cost = ERA_UP_COSTS[player.era];
     if (!cost) throw new Error('Era máxima atingida');
     if (!player.resources.canAfford(cost)) {
       throw new Error('Recursos insuficientes para avançar de era');
     }
+    const newEra = player.era + 1;
     this._players.set(playerId, {
       ...player,
-      era: player.era + 1,
+      era: newEra,
       resources: player.resources.subtract(cost),
     });
+
+    // Aplica os bônus de era às unidades EXISTENTES do jogador (campo + dentro de
+    // construções). setEra usa a era absoluta, então o bônus nunca é aplicado duas vezes.
+    for (const v of this._villagers.values()) if (v.ownerId === playerId) v.setEra(newEra);
+    for (const list of this._garrisons.values()) for (const u of list) if (u.ownerId === playerId) u.setEra(newEra);
+    for (const list of this._occupants.values()) for (const u of list) if (u.ownerId === playerId) u.setEra(newEra);
 
     // Avançar de era recupera totalmente a vida da Torre Principal (única forma de curá-la).
     for (const tc of this._townCenters.values()) {
@@ -283,7 +292,9 @@ export class GameSession {
     if (!player.resources.canAfford(cfg.trainCost)) {
       throw new Error(`Recursos insuficientes para treinar ${cfg.label}`);
     }
-    tc.startTraining(unitType, cfg.trainTicks);
+    // Eras mais altas reduzem o tempo de treino.
+    const trainTicks = Math.max(1, Math.floor(cfg.trainTicks * (ERA_UNIT_TRAIN_MULT[player.era] ?? 1.0)));
+    tc.startTraining(unitType, trainTicks);
     this._players.set(playerId, {
       ...player,
       resources: player.resources.subtract(cfg.trainCost),
@@ -537,10 +548,10 @@ export class GameSession {
       attacker.setAttackInRange(inRange);
 
       if (inRange) {
-        // In range: deal damage on cooldown
+        // In range: deal damage on cooldown (dano escalado pela era do atacante)
         attacker.incrementAttackCounter();
         if (attacker.attackTickCounter >= cfg.attackCooldownTicks) {
-          this._applyDamage(curId, curKind, cfg.attackDamage);
+          this._applyDamage(curId, curKind, attacker.attackDamage);
           attacker.resetAttackCounter();
         }
         continue;
@@ -561,7 +572,7 @@ export class GameSession {
         const ddx = next.x - attacker.x;
         const ddy = next.y - attacker.y;
         const d = Math.hypot(ddx, ddy) || 1;
-        const speed = cfg.moveSpeedTiles;
+        const speed = attacker.moveSpeedTiles;
         if (d <= speed) attacker.nudge(ddx, ddy);
         else attacker.nudge((ddx / d) * speed, (ddy / d) * speed);
       } else {
@@ -610,15 +621,17 @@ export class GameSession {
     const archerCfg = UNIT_CONFIGS.archer;
     for (const tower of this._playerBuildings.values()) {
       if (tower.type !== 'watchtower' || !tower.isComplete) continue;
-      const count = this._garrisons.get(tower.id)?.length ?? 0;
-      if (count === 0) { tower.clearTowerTarget(); continue; }
+      const garrison = this._garrisons.get(tower.id);
+      if (!garrison || garrison.length === 0) { tower.clearTowerTarget(); continue; }
       tower.tickTowerCooldown();
       const cx = tower.x + 0.5, cy = tower.y + 0.5;
       const targetId = this._findEnemyUnitNear(cx, cy, archerCfg.attackRange, tower.ownerId);
       if (!targetId) { tower.clearTowerTarget(); continue; }
       tower.setTowerTarget(targetId);
       if (tower.canTowerFire) {
-        this._applyDamage(targetId, 'unit', archerCfg.attackDamage * count);
+        // Dano = soma do dano dos arqueiros dentro (já escalado pela era de cada um).
+        const dmg = garrison.reduce((s, a) => s + a.attackDamage, 0);
+        this._applyDamage(targetId, 'unit', dmg);
         tower.resetTowerCooldown(archerCfg.attackCooldownTicks);
       }
     }
@@ -757,12 +770,26 @@ export class GameSession {
         .filter(n => !n.isDepleted)
         .map(n => n.toJSON()),
       playerBuildings: Array.from(this._playerBuildings.values()).map(b => {
-        const inside = b.type === 'watchtower'
-          ? this._garrisons.get(b.id)?.length
-          : b.isProduction ? this._occupants.get(b.id)?.length : undefined;
-        return b.toJSON(inside);
+        if (b.type === 'watchtower') return b.toJSON(this._garrisons.get(b.id)?.length);
+        if (b.isProduction) {
+          const occupants = this._occupants.get(b.id)?.length ?? 0;
+          return { ...b.toJSON(occupants), ...this._productionInfo(b, occupants) };
+        }
+        return b.toJSON();
       }),
     };
+  }
+
+  /** Taxa de produção atual (recurso/segundo) e eficiência de uma construção. */
+  private _productionInfo(b: PlayerBuilding, occupants: number): {
+    prodResource: 'gold' | 'wood' | 'stone' | 'food'; prodPerSec: number; efficiency: number;
+  } {
+    const gen = b.config.generates!;
+    const [resource, baseAmount] = Object.entries(gen)[0] as ['gold' | 'wood' | 'stone' | 'food', number];
+    const eraMult = ERA_GEN_MULT[this._players.get(b.ownerId)?.era ?? 1] ?? 1.0;
+    const perCycle = Math.floor(baseAmount * eraMult * b.productionScale * occupants);
+    const cycleSeconds = BUILDING_GEN_INTERVAL_TICKS / 4; // 4 ticks por segundo
+    return { prodResource: resource, prodPerSec: perCycle / cycleSeconds, efficiency: b.productionScale };
   }
 
   // ── Private helpers ─────────────────────────────────────────────────────────
@@ -1066,15 +1093,18 @@ export class GameSession {
       { x: tcAnchorX, y: tcAnchorY + 3 },
       { x: tcAnchorX - 1, y: tcAnchorY },
     ];
+    const era = this._players.get(playerId)?.era ?? 1;
     const occupied = new Set(Array.from(this._villagers.values()).map(v => `${Math.round(v.x)},${Math.round(v.y)}`));
     for (const pos of candidates) {
       if (!occupied.has(`${pos.x},${pos.y}`) && this._isTileWalkable(pos.x, pos.y)) {
         const v = new Villager(VillagerId.generate(), playerId, pos.x, pos.y, unitType);
+        v.setEra(era); // nova unidade já nasce com os bônus da era atual do dono
         this._villagers.set(v.id.value, v);
         return;
       }
     }
     const v = new Villager(VillagerId.generate(), playerId, tcAnchorX + 3, tcAnchorY, unitType);
+    v.setEra(era);
     this._villagers.set(v.id.value, v);
   }
 }

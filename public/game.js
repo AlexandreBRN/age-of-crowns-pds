@@ -41,6 +41,12 @@ const BUILDING_DEFS = {
   stone_quarry: { label:'Pedreira',       width:2, height:2, cost:{wood:30,stone:10},   color:'#808080' },
 };
 
+// Rótulos/ícones dos recursos para os indicadores de produção.
+const RES_LABELS = { gold: 'Ouro', wood: 'Madeira', stone: 'Pedra', food: 'Comida' };
+const RES_EMOJI  = { gold: '🪙', wood: '🪵', stone: '🪨', food: '🍖' };
+// Formata uma taxa (recursos/s) sem ".0" desnecessário (ex.: 15, 7.5).
+function fmtRate(n) { return Number((n ?? 0).toFixed(1)).toString(); }
+
 // Per-building sprite-sheet metadata (5 horizontal frames, 0=blueprint, 1=construction,
 // 2=era1, 3=era2, 4=era3). Update `fw`/`fh` when the source PNG is re-exported.
 // `footRatio` is how far down (fraction of drawH) the building's ground line sits
@@ -655,6 +661,7 @@ function handleMessage(msg) {
         }
         for (const id of G.villagerPrevPos.keys()) if (!liveIds.has(id)) G.villagerPrevPos.delete(id);
       }
+      detectEraAdvances(msg.snapshot);
       G.snapshot = msg.snapshot;
       G.lastSnapshotTime = performance.now();
       G.myPlayerIndex = G.snapshot.players.findIndex(p => p.id === G.playerId);
@@ -1820,20 +1827,32 @@ function renderPlayerBuilding(snapshot, b) {
     outlineFootprint(b.x, b.y, w, h, '#ffe070', [4, 3]);
   }
 
-  // Worker-occupancy badge on production buildings (👷 N/M, dim when stopped).
+  // Floating production indicator on production buildings: workers + live rate.
   if (b.occupantsMax !== undefined && b.status === 'complete') {
     const ground = worldToScreen(b.x + w / 2, b.y + h / 2);
+    const bx2 = ground.sx, topY = (topAnchor ? topAnchor.sy : ground.sy) - 16;
     ctx.save();
     ctx.font = 'bold 11px Georgia';
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
-    const text = `👷 ${b.occupants}/${b.occupantsMax}`;
-    const bw2 = ctx.measureText(text).width + 12;
-    const bx2 = ground.sx, by2 = (topAnchor ? topAnchor.sy : ground.sy) - 16;
+    // Line 1: production rate (or paused) — the floating indicator of current output.
+    const icon = RES_EMOJI[b.prodResource] ?? '';
+    const rateText = b.producing ? `+${fmtRate(b.prodPerSec)} ${icon}/s` : '⏸ Parado';
+    // Line 2: worker occupancy.
+    const workText = `👷 ${b.occupants}/${b.occupantsMax}`;
+    const wRate = ctx.measureText(rateText).width + 12;
+    const wWork = ctx.measureText(workText).width + 12;
+    // Rate badge (top)
+    ctx.fillStyle = 'rgba(20,12,6,0.85)';
+    ctx.fillRect(bx2 - wRate / 2, topY - 9, wRate, 17);
+    ctx.fillStyle = b.producing ? '#ffe070' : '#c08060';
+    ctx.fillText(rateText, bx2, topY);
+    // Worker badge (just below)
+    const wy = topY + 18;
     ctx.fillStyle = 'rgba(20,12,6,0.82)';
-    ctx.fillRect(bx2 - bw2 / 2, by2 - 9, bw2, 17);
+    ctx.fillRect(bx2 - wWork / 2, wy - 9, wWork, 17);
     ctx.fillStyle = b.producing ? '#80e060' : '#c08060';
-    ctx.fillText(text, bx2, by2);
+    ctx.fillText(workText, bx2, wy);
     ctx.restore();
   }
 
@@ -2706,7 +2725,8 @@ function updateTownCenterHud() {
 
     el.style.borderTopColor = teamColor;
     const nameEl = el.querySelector('.tc-hud-name');
-    nameEl.textContent = (isMe ? '🛡 ' : '⚔ ') + (player.name || ('Equipe ' + (i + 1)));
+    const baseName = player.name || ('Equipe ' + (i + 1));
+    nameEl.textContent = `${isMe ? '🛡 ' : '⚔ '}${baseName} · 👑 Era ${player.era ?? 1}`;
     nameEl.style.color = teamColor;
 
     const fill = el.querySelector('.tc-hud-fill');
@@ -2756,7 +2776,7 @@ function updateHUD() {
       eraBtn.disabled = true;
       eraCost.textContent = 'Era máxima';
     } else {
-      const c = ERA_UP_COSTS[era + 1];
+      const c = ERA_UP_COSTS[era];   // custo para avançar A PARTIR da era atual (1→2, 2→3)
       const afford = r.gold >= c.gold && r.wood >= c.wood && r.stone >= c.stone && r.food >= c.food;
       eraBtn.disabled = !afford;
       eraCost.textContent = `🪙 ${c.gold} 🪵 ${c.wood} 🪨 ${c.stone} 🍖 ${c.food}`;
@@ -2817,6 +2837,11 @@ function updatePanel() {
       label.textContent = `Trabalhadores: ${selBuilding.occupants}/${selBuilding.occupantsMax}`;
       btn.textContent = 'Remover Trabalhadores';
       btn.disabled = selBuilding.occupants === 0;
+      const resName = RES_LABELS[selBuilding.prodResource] ?? selBuilding.prodResource ?? '';
+      const rate = fmtRate(selBuilding.prodPerSec ?? 0);
+      const eff = Math.round((selBuilding.efficiency ?? 0) * 100);
+      info += `\nProdução: +${rate} ${resName}/s`;
+      info += `\nEficiência: ${eff}%`;
       info += selBuilding.producing ? '\n⚙ Produzindo' : '\n⏸ Parado (sem trabalhadores)';
     } else {
       towerSection.style.display = 'none';
@@ -2914,6 +2939,19 @@ function showResultScreen(snapshot) {
 function hideResultScreen() {
   G.resultShown = false;
   document.getElementById('result-overlay').style.display = 'none';
+}
+
+// Compara as eras do snapshot novo com o atual e notifica quando alguém evolui.
+function detectEraAdvances(next) {
+  if (!G.snapshot) return;
+  for (const np of next.players ?? []) {
+    const op = G.snapshot.players.find(p => p.id === np.id);
+    if (op && (np.era ?? 1) > (op.era ?? 1)) {
+      const isMe = np.id === G.playerId;
+      const who = isMe ? 'Você' : (np.name || 'O inimigo');
+      setHudStatus(`⏫ ${who} avançou para a Era ${np.era}!`);
+    }
+  }
 }
 
 function setLobbyStatus(msg) {

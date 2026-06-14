@@ -39,9 +39,11 @@ export const POPULATION_PER_HOUSE = 5;
 export const PRODUCTION_OCCUPANT_CAPACITY = 3;
 // A produção começa cheia e fica cada vez mais difícil a cada ciclo, com um piso.
 // Avançar de era reseta a escala para o máximo (volta a render bastante).
+// Decaimento suave (~0.985/ciclo de 2s): leva uns minutos para chegar ao piso,
+// então a construção gera recurso por bastante tempo antes de cair de rendimento.
 const PRODUCTION_SCALE_MAX = 1.0;
-const PRODUCTION_SCALE_DECAY = 0.88;
-const PRODUCTION_SCALE_FLOOR = 0.25;
+const PRODUCTION_SCALE_DECAY = 0.985;
+const PRODUCTION_SCALE_FLOOR = 0.30;
 
 // Quanto tempo (em ticks) cada segmento de muro leva para ser construído após o
 // aldeão iniciar. 8 ticks = ~2 segundos (loop a 250ms) — dá tempo de ver a
