@@ -68,6 +68,12 @@ export interface PlayerBuildingDTO {
   efficiency?: number;                      // eficiência atual da produção (0..1)
 }
 
+export interface ProjectileDTO {
+  id: string;
+  x: number; y: number;               // posição atual (tiles)
+  tx: number; ty: number;             // posição do alvo (direção do voo)
+}
+
 export interface GameStateSnapshot {
   sessionId: string;
   tick: number;
@@ -78,4 +84,5 @@ export interface GameStateSnapshot {
   townCenters: TownCenterDTO[];
   resourceNodes: ResourceNodeDTO[];
   playerBuildings: PlayerBuildingDTO[];
+  projectiles: ProjectileDTO[];       // flechas em voo
 }

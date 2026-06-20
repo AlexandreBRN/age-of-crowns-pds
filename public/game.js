@@ -891,6 +891,7 @@ function render() {
 
   renderTiles();
   if (snapshot) renderEntitiesSorted(snapshot);
+  renderProjectiles();
   renderGroupMoveLine();
   renderFog();
   renderBuildingGhost();
@@ -1560,33 +1561,33 @@ function renderTowerGarrison(b) {
   ctx.fillRect(bx - bw / 2, by - 9, bw, 17);
   ctx.fillStyle = count > 0 ? '#ffe080' : '#998060';
   ctx.fillText(label, bx, by);
-
-  // Arrows flying to the current target
-  if (count > 0 && b.towerTargetId) {
-    const target = G.snapshot?.villagers.find(v => v.id === b.towerTargetId);
-    if (target) {
-      const tp = target.subPosition ?? target.position;
-      const to = worldToScreen(tp.x + 0.5, tp.y + 0.5);
-      const fx = ground.sx, fy = ground.sy - 64;          // shoot from tower top
-      const tx2 = to.sx, ty2 = to.sy - 6;
-      const ang = Math.atan2(ty2 - fy, tx2 - fx);
-      const now = performance.now();
-      for (let i = 0; i < count; i++) {
-        const t = ((now / 360) + i / count) % 1;
-        const ax = fx + (tx2 - fx) * t;
-        const ay = fy + (ty2 - fy) * t - Math.sin(t * Math.PI) * 16;  // arc up
-        ctx.save();
-        ctx.translate(ax, ay);
-        ctx.rotate(ang);
-        ctx.strokeStyle = '#e8d0a0'; ctx.lineWidth = 2;
-        ctx.beginPath(); ctx.moveTo(-6, 0); ctx.lineTo(5, 0); ctx.stroke();
-        ctx.fillStyle = '#fff';
-        ctx.beginPath(); ctx.moveTo(7, 0); ctx.lineTo(2, -2.5); ctx.lineTo(2, 2.5); ctx.closePath(); ctx.fill();
-        ctx.restore();
-      }
-    }
-  }
   ctx.restore();
+  // As flechas reais são projéteis do servidor (renderProjectiles), não mais um efeito decorativo aqui.
+}
+
+// Flechas reais em voo (projéteis do servidor). Cada arqueiro guarnecido dispara a
+// sua própria, então uma torre cheia mostra uma verdadeira saraivada.
+function renderProjectiles() {
+  if (!G.snapshot) return;
+  const ctx = G.ctx;
+  for (const p of G.snapshot.projectiles ?? []) {
+    const pos = worldToScreen(p.x + 0.5, p.y + 0.5);
+    const tgt = worldToScreen(p.tx + 0.5, p.ty + 0.5);
+    const ang = Math.atan2(tgt.sy - pos.sy, tgt.sx - pos.sx);
+    ctx.save();
+    ctx.translate(pos.sx, pos.sy + TILE_H / 2 - 6); // leve elevação (flecha no ar)
+    ctx.rotate(ang);
+    // haste
+    ctx.strokeStyle = '#e8d0a0'; ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.moveTo(-7, 0); ctx.lineTo(6, 0); ctx.stroke();
+    // ponta
+    ctx.fillStyle = '#fff';
+    ctx.beginPath(); ctx.moveTo(9, 0); ctx.lineTo(3, -3); ctx.lineTo(3, 3); ctx.closePath(); ctx.fill();
+    // penas
+    ctx.strokeStyle = '#c08040'; ctx.lineWidth = 1.5;
+    ctx.beginPath(); ctx.moveTo(-7, 0); ctx.lineTo(-10, -3); ctx.moveTo(-7, 0); ctx.lineTo(-10, 3); ctx.stroke();
+    ctx.restore();
+  }
 }
 
 // ── Player Building (iso 3D boxes by type) ──────────────────────────────────

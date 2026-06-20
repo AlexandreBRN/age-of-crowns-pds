@@ -16,6 +16,19 @@ export interface PlayerData {
   era: number;
 }
 
+// Flecha em voo: parte da torre e persegue o alvo; causa dano ao atingi-lo.
+interface Projectile {
+  id: string;
+  ownerId: string;
+  x: number; y: number;          // posição atual (tiles)
+  targetId: string;
+  targetKind: AttackTargetKind;
+  damage: number;
+  tx: number; ty: number;        // última posição conhecida do alvo (para o render)
+}
+
+const ARROW_SPEED = 1.4;         // tiles por tick
+
 // Cost to advance to era index N (index 0 unused). Era 1 is the initial state.
 export const ERA_UP_COSTS: ReadonlyArray<{ gold: number; wood: number; stone: number; food: number } | null> = [
   null,                                                  // era 1 (initial)
@@ -75,6 +88,8 @@ export class GameSession {
   private readonly _garrisons: Map<string, Villager[]> = new Map();
   // Aldeões trabalhando dentro de construções de produção (também saem do campo).
   private readonly _occupants: Map<string, Villager[]> = new Map();
+  // Flechas em voo disparadas pelas torres guarnecidas.
+  private readonly _projectiles: Map<string, Projectile> = new Map();
   private _tick = 0;
   private _gameOver = false;
   private _winnerId: string | null = null;
@@ -575,6 +590,22 @@ export class GameSession {
     const isBlockedFor = (ownerId: string, x: number, y: number) =>
       !this._isTileWalkable(x, y) || this._isTileBlockedByCompleteBuildingFor(ownerId, x, y);
 
+    // ── Projéteis: cada flecha persegue o alvo e causa dano ao atingi-lo ───────
+    for (const [id, p] of this._projectiles) {
+      const tpos = this._getTargetCenter(p.targetId, p.targetKind);
+      if (!tpos) { this._projectiles.delete(id); continue; } // alvo sumiu → flecha some
+      p.tx = tpos.x; p.ty = tpos.y;
+      const dx = tpos.x - p.x, dy = tpos.y - p.y;
+      const d = Math.hypot(dx, dy);
+      if (d <= ARROW_SPEED) {
+        this._applyDamage(p.targetId, p.targetKind, p.damage); // dano no impacto
+        this._projectiles.delete(id);
+      } else {
+        p.x += (dx / d) * ARROW_SPEED;
+        p.y += (dy / d) * ARROW_SPEED;
+      }
+    }
+
     // ── Movement (fractional tiles per tick — handled inside stepTowardTarget) ─
     for (const villager of this._villagers.values()) {
       if (villager.state !== 'moving') continue;
@@ -714,9 +745,12 @@ export class GameSession {
       if (!targetId) { tower.clearTowerTarget(); continue; }
       tower.setTowerTarget(targetId);
       if (tower.canTowerFire) {
-        // Dano = soma do dano dos arqueiros dentro (já escalado pela era de cada um).
-        const dmg = garrison.reduce((s, a) => s + a.attackDamage, 0);
-        this._applyDamage(targetId, 'unit', dmg);
+        // Cada arqueiro guarnecido dispara a SUA própria flecha (1 arqueiro = 1 flecha,
+        // 3 arqueiros = 3 flechas simultâneas). O dano de cada uma é aplicado no impacto.
+        const cx = tower.x + 0.5, cy = tower.y + 0.5;
+        for (const archer of garrison) {
+          this._spawnArrow(cx, cy, targetId, 'unit', tower.ownerId, archer.attackDamage);
+        }
         tower.resetTowerCooldown(archerCfg.attackCooldownTicks);
       }
     }
@@ -865,6 +899,7 @@ export class GameSession {
         }
         return b.toJSON();
       }),
+      projectiles: Array.from(this._projectiles.values()).map(p => ({ id: p.id, x: p.x, y: p.y, tx: p.tx, ty: p.ty })),
     };
   }
 
@@ -1063,6 +1098,14 @@ export class GameSession {
       if (d < min) min = d;
     }
     return min;
+  }
+
+  /** Lança uma flecha da origem em direção ao alvo (dano aplicado ao atingir). */
+  private _spawnArrow(fromX: number, fromY: number, targetId: string, kind: AttackTargetKind, ownerId: string, damage: number): void {
+    const id = uuidv4();
+    this._projectiles.set(id, {
+      id, ownerId, x: fromX, y: fromY, targetId, targetKind: kind, damage, tx: fromX, ty: fromY,
+    });
   }
 
   private _applyDamage(targetId: string, kind: AttackTargetKind, amount: number): void {
