@@ -23,6 +23,7 @@ export interface TownCenterDTO {
   isTraining: boolean;
   trainTicksRemaining: number;
   trainingUnitType: 'villager' | 'archer' | 'cavalry' | null;
+  trainQueue: ('villager' | 'archer' | 'cavalry')[];   // unidades aguardando na fila
   hp: number;
   maxHp: number;
 }

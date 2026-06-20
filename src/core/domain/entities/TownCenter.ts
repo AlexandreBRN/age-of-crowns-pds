@@ -5,6 +5,7 @@ const TOWN_CENTER_MAX_HP = 500;
 export class TownCenter {
   private _trainTicksRemaining = 0;
   private _trainingUnitType: UnitType | null = null;
+  private _trainQueue: UnitType[] = [];   // unidades aguardando após a atual
   private _hp = TOWN_CENTER_MAX_HP;
 
   constructor(
@@ -21,6 +22,9 @@ export class TownCenter {
   get isTraining(): boolean { return this._trainTicksRemaining > 0; }
   get trainTicksRemaining(): number { return this._trainTicksRemaining; }
   get trainingUnitType(): UnitType | null { return this._trainingUnitType; }
+  get queueLength(): number { return this._trainQueue.length; }
+  /** Total de unidades em produção (a atual + a fila) — usado no limite de população. */
+  get pendingCount(): number { return (this.isTraining ? 1 : 0) + this._trainQueue.length; }
   get hp(): number { return this._hp; }
   get maxHp(): number { return TOWN_CENTER_MAX_HP; }
   get isDestroyed(): boolean { return this._hp <= 0; }
@@ -41,6 +45,16 @@ export class TownCenter {
     }
     this._trainingUnitType = unitType;
     this._trainTicksRemaining = ticks;
+  }
+
+  /** Adiciona uma unidade ao fim da fila de produção. */
+  enqueue(unitType: UnitType): void {
+    this._trainQueue.push(unitType);
+  }
+
+  /** Remove e devolve a próxima unidade da fila (ou null se vazia). */
+  dequeueNext(): UnitType | null {
+    return this._trainQueue.shift() ?? null;
   }
 
   /** Returns true when training completes this tick. */
@@ -70,6 +84,7 @@ export class TownCenter {
       isTraining: this.isTraining,
       trainTicksRemaining: this._trainTicksRemaining,
       trainingUnitType: this._trainingUnitType,
+      trainQueue: [...this._trainQueue],
       hp: this._hp,
       maxHp: TOWN_CENTER_MAX_HP,
     };

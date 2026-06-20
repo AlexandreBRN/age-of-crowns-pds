@@ -2886,9 +2886,14 @@ function updateHUD() {
     popEl.style.color = popFull ? '#ff6a5a' : '#ffe080';
   }
 
-  document.getElementById('btn-train').disabled         = training || popFull || r.food < 50;
-  document.getElementById('btn-train-archer').disabled  = training || popFull || r.food < 50 || r.wood < 30;
-  document.getElementById('btn-train-cavalry').disabled = training || popFull || r.food < 80 || r.gold < 50;
+  // Unidades já em produção + fila contam para a população (não dá pra enfileirar
+  // além do limite). Os botões NÃO ficam mais bloqueados só por estar treinando —
+  // assim dá pra clicar várias vezes e empilhar na fila.
+  const pending = (training ? 1 : 0) + (myTc?.trainQueue?.length ?? 0);
+  const queueFull = (pop + pending) >= popMax;
+  document.getElementById('btn-train').disabled         = queueFull || r.food < 50;
+  document.getElementById('btn-train-archer').disabled  = queueFull || r.food < 50 || r.wood < 30;
+  document.getElementById('btn-train-cavalry').disabled = queueFull || r.food < 80 || r.gold < 50;
 
   // Era HUD + advance-era button
   const era = me.era ?? 1;
@@ -2910,11 +2915,10 @@ function updateHUD() {
 
   const trainEl = document.getElementById('train-status');
   if (training && myTc) {
-    const unitTicks = { villager:20, archer:24, cavalry:40 };
-    const totalTicks = unitTicks[myTc.trainingUnitType] ?? 20;
     const secs = Math.ceil(myTc.trainTicksRemaining * 0.25);
     const label = UNIT_DEFS[myTc.trainingUnitType]?.label ?? 'Unidade';
-    trainEl.textContent = `⏳ ${label}... ${secs}s`;
+    const queued = myTc.trainQueue?.length ?? 0;
+    trainEl.textContent = `⏳ ${label}... ${secs}s` + (queued > 0 ? `  (fila: +${queued})` : '');
   } else {
     trainEl.textContent = '';
   }

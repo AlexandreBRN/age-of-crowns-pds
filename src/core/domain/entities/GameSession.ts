@@ -372,22 +372,33 @@ export class GameSession {
     attacker.commandAttack(targetId, targetKind);
   }
 
+  /** Tempo de treino (ticks) de uma unidade, já com a redução por era do jogador. */
+  private _trainTicksFor(unitType: UnitType, era: number): number {
+    return Math.max(1, Math.floor(UNIT_CONFIGS[unitType].trainTicks * (ERA_UNIT_TRAIN_MULT[era] ?? 1.0)));
+  }
+
+  /**
+   * Treina uma unidade. Se o Centro de Cidade já estiver produzindo, a unidade
+   * entra na FILA e começa automaticamente quando a anterior terminar. O custo é
+   * pago ao enfileirar; a população considera a unidade atual + toda a fila.
+   */
   startTrainingUnit(playerId: string, unitType: UnitType): void {
     const player = this._players.get(playerId);
     if (!player) throw new Error('Jogador não encontrado');
     const cfg = UNIT_CONFIGS[unitType];
-    // Conta a unidade em treino na população (não pode passar do limite).
     const tc = this._getTownCenterOf(playerId);
-    const pending = tc.isTraining ? 1 : 0;
-    if (this.populationOf(playerId) + pending >= this.populationCapOf(playerId)) {
+    // Cada unidade em produção/fila ocupa uma vaga de população.
+    if (this.populationOf(playerId) + tc.pendingCount >= this.populationCapOf(playerId)) {
       throw new Error('Limite de população atingido — construa uma Casa');
     }
     if (!player.resources.canAfford(cfg.trainCost)) {
       throw new Error(`Recursos insuficientes para treinar ${cfg.label}`);
     }
-    // Eras mais altas reduzem o tempo de treino.
-    const trainTicks = Math.max(1, Math.floor(cfg.trainTicks * (ERA_UNIT_TRAIN_MULT[player.era] ?? 1.0)));
-    tc.startTraining(unitType, trainTicks);
+    if (tc.isTraining) {
+      tc.enqueue(unitType);          // já produzindo → vai para a fila
+    } else {
+      tc.startTraining(unitType, this._trainTicksFor(unitType, player.era));
+    }
     this._players.set(playerId, {
       ...player,
       resources: player.resources.subtract(cfg.trainCost),
@@ -803,6 +814,12 @@ export class GameSession {
       const done = tc.tickTraining();
       if (done) {
         this._spawnTrainedUnit(tc.ownerId, tc.anchorX, tc.anchorY, tc.trainingUnitType ?? 'villager');
+        // Inicia automaticamente a próxima unidade da fila, sem novo comando.
+        const next = tc.dequeueNext();
+        if (next) {
+          const era = this._players.get(tc.ownerId)?.era ?? 1;
+          tc.startTraining(next, this._trainTicksFor(next, era));
+        }
       }
     }
 
