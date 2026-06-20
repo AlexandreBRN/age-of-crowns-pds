@@ -29,6 +29,11 @@ interface Projectile {
 
 const ARROW_SPEED = 1.4;         // tiles por tick
 
+// Raio de percepção: unidades militares engajam inimigos próximos automaticamente.
+const DETECTION_RADIUS = 7;      // tiles
+// Distância mínima entre unidades (colisão suave — evita empilhamento).
+const UNIT_MIN_SEPARATION = 0.8; // tiles
+
 // Cost to advance to era index N (index 0 unused). Era 1 is the initial state.
 export const ERA_UP_COSTS: ReadonlyArray<{ gold: number; wood: number; stone: number; food: number } | null> = [
   null,                                                  // era 1 (initial)
@@ -705,15 +710,20 @@ export class GameSession {
       }
     }
 
+    // ── Colisão suave: separa unidades que se sobrepõem (não empilham) ─────────
+    this._resolveUnitCollisions();
+
     // Uma Torre Principal foi destruída? Encerra a partida imediatamente,
     // congelando o estado atual (sem mover/treinar/limpar entidades).
     if (this._checkGameOver()) return;
 
-    // ── Auto-attack idle combat units ────────────────────────────────────────
+    // ── Engajamento automático: unidades militares ociosas atacam o inimigo mais
+    // próximo dentro da percepção. Ao matar o alvo voltam a ficar ociosas e, no
+    // tick seguinte, procuram o próximo — até não haver mais inimigos por perto. ─
     for (const unit of this._villagers.values()) {
-      if (unit.state !== 'idle' || unit.config.attackDamage === 0) continue;
-      const enemy = this._findNearestEnemyInRange(unit);
-      if (enemy) unit.commandAttack(enemy.id, enemy.kind);
+      if (unit.state !== 'idle' || unit.unitType === 'villager') continue; // só militares
+      const enemy = this._findNearestEnemyUnitInPerception(unit);
+      if (enemy) unit.commandAttack(enemy.id, 'unit');
     }
 
     // ── Chegada em construções: torre→guarnição, Fazenda→lavoura (visível), demais→entra ─
@@ -1131,28 +1141,46 @@ export class GameSession {
     else if (kind === 'town_center') this._townCenters.get(targetId)?.takeDamage(amount);
   }
 
-  private _findNearestEnemyInRange(unit: Villager): { id: string; kind: AttackTargetKind } | null {
-    const range = unit.config.attackRange;
+  /** Inimigo (unidade) mais próximo dentro do raio de percepção, para engajamento automático. */
+  private _findNearestEnemyUnitInPerception(unit: Villager): { id: string; kind: AttackTargetKind } | null {
     let best: { id: string; kind: AttackTargetKind } | null = null;
-    let bestDist = range + 1;
-
+    let bestDist = DETECTION_RADIUS + 1e-3;
     for (const v of this._villagers.values()) {
-      if (v.ownerId === unit.ownerId || v.isDead) continue;
+      if (v.ownerId === unit.ownerId || v.isDead || v.isDying) continue;
       const d = Math.max(Math.abs(v.x - unit.x), Math.abs(v.y - unit.y));
       if (d < bestDist) { bestDist = d; best = { id: v.id.value, kind: 'unit' }; }
     }
-    for (const b of this._playerBuildings.values()) {
-      if (b.ownerId === unit.ownerId || !b.isComplete || b.isDestroyed) continue;
-      const d = this._distToTarget(unit.x, unit.y, b.id, 'building'); // borda, não o centro
-      if (d < bestDist) { bestDist = d; best = { id: b.id, kind: 'building' }; }
-    }
-    for (const tc of this._townCenters.values()) {
-      if (tc.ownerId === unit.ownerId || tc.isDestroyed) continue;
-      const d = this._distToTarget(unit.x, unit.y, tc.id, 'town_center');
-      if (d < bestDist) { bestDist = d; best = { id: tc.id, kind: 'town_center' }; }
-    }
-
     return best;
+  }
+
+  /**
+   * Colisão suave entre unidades: empurra para os lados pares que se sobrepõem,
+   * sem entrar em terreno/parede bloqueada. Evita o empilhamento e faz as tropas
+   * se distribuírem naturalmente ao redor dos inimigos durante o combate.
+   * Aplica-se a unidades em movimento/combate/ociosas (não aos trabalhadores).
+   */
+  private _resolveUnitCollisions(): void {
+    const blocked = (ownerId: string, x: number, y: number) =>
+      !this._isTileWalkable(x, y) || this._isTileBlockedByCompleteBuildingFor(ownerId, x, y);
+    const push = (u: Villager, dx: number, dy: number) => {
+      if (blocked(u.ownerId, Math.round(u.x + dx), Math.round(u.y + dy))) return;
+      u.nudge(dx, dy);
+    };
+    const units = Array.from(this._villagers.values()).filter(u =>
+      u.state === 'moving' || u.state === 'attacking' || u.state === 'idle');
+    for (let i = 0; i < units.length; i++) {
+      for (let j = i + 1; j < units.length; j++) {
+        const a = units[i], b = units[j];
+        let dx = b.x - a.x, dy = b.y - a.y;
+        let d = Math.hypot(dx, dy);
+        if (d >= UNIT_MIN_SEPARATION) continue;
+        if (d < 1e-4) { dx = (i % 2 ? 0.02 : -0.02); dy = 0.02; d = Math.hypot(dx, dy); } // sobrepostos
+        const overlap = (UNIT_MIN_SEPARATION - d) / 2;
+        const nx = dx / d, ny = dy / d;
+        push(a, -nx * overlap, -ny * overlap);
+        push(b, nx * overlap, ny * overlap);
+      }
+    }
   }
 
   private _findBuilder(
