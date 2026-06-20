@@ -2718,6 +2718,24 @@ function setupInput() {
     updatePanel();
   });
 
+  // Duplo-clique num boneco → seleciona todos da mesma categoria que estão ociosos
+  // (ex.: 2 cliques num aldeão selecionam todos os aldeões ociosos). O próprio
+  // clicado entra sempre, mesmo que não esteja ocioso.
+  G.canvas.addEventListener('dblclick', (e) => {
+    if (e.button !== 0 || G.placingBuildingType) return;
+    const { tx, ty } = pixelToTile(e);
+    const v = villagerAtTile(tx, ty);
+    if (!v) return;
+    G.selectedIds.clear();
+    G.selectedBuildingId = null;
+    G.groupDest = null;
+    for (const u of G.snapshot?.villagers ?? []) {
+      if (u.ownerId !== G.playerId || u.unitType !== v.unitType) continue;
+      if (u.state === 'idle' || u.id === v.id) G.selectedIds.add(u.id);
+    }
+    updatePanel();
+  });
+
   G.canvas.addEventListener('contextmenu', (e) => {
     e.preventDefault();
 
