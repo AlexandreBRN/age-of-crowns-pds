@@ -33,6 +33,8 @@ const ARROW_SPEED = 1.4;         // tiles por tick
 const DETECTION_RADIUS = 7;      // tiles
 // Distância mínima entre unidades (colisão suave — evita empilhamento).
 const UNIT_MIN_SEPARATION = 0.8; // tiles
+// Ticks sem avançar até considerar a unidade "presa" (8 = ~2s a 4 ticks/s).
+const MOVE_STUCK_TICKS = 8;
 
 // Cost to advance to era index N (index 0 unused). Era 1 is the initial state.
 export const ERA_UP_COSTS: ReadonlyArray<{ gold: number; wood: number; stone: number; food: number } | null> = [
@@ -625,7 +627,16 @@ export class GameSession {
     // ── Movement (fractional tiles per tick — handled inside stepTowardTarget) ─
     for (const villager of this._villagers.values()) {
       if (villager.state !== 'moving') continue;
-      villager.stepTowardTarget((x, y) => isBlockedFor(villager.ownerId, x, y));
+      const blocked = (x: number, y: number) => isBlockedFor(villager.ownerId, x, y);
+      const bx = villager.x, by = villager.y;
+      villager.stepTowardTarget(blocked);
+      // Detecção de "preso": se não avançou, conta. Após muito tempo sem progresso,
+      // recalcula a rota para uma posição livre próxima ou cancela o movimento.
+      const moved = Math.hypot(villager.x - bx, villager.y - by) > 0.005;
+      villager.trackMovementProgress(moved);
+      if (villager.state === 'moving' && villager.noProgressTicks >= MOVE_STUCK_TICKS) {
+        this._unstickVillager(villager, blocked);
+      }
     }
 
     // ── Construction / Repair ─────────────────────────────────────────────────
@@ -1181,6 +1192,33 @@ export class GameSession {
         push(b, nx * overlap, ny * overlap);
       }
     }
+  }
+
+  /**
+   * Unidade presa: procura a posição livre alcançável mais próxima do destino e
+   * recalcula a rota até ela. Se nada estiver acessível, cancela o movimento
+   * (volta a ficar ociosa → a animação de caminhada para).
+   */
+  private _unstickVillager(v: Villager, blocked: (x: number, y: number) => boolean): void {
+    const tx = v.moveTargetX, ty = v.moveTargetY;
+    if (tx === null || ty === null) { v.setIdle(); return; }
+    const sx = Math.round(v.x), sy = Math.round(v.y);
+    let tries = 0;
+    for (let r = 1; r <= 4 && tries < 16; r++) {
+      for (let dy = -r; dy <= r && tries < 16; dy++) {
+        for (let dx = -r; dx <= r && tries < 16; dx++) {
+          if (Math.max(Math.abs(dx), Math.abs(dy)) !== r) continue; // só o anel externo
+          const nx = tx + dx, ny = ty + dy;
+          if (blocked(nx, ny) || (nx === sx && ny === sy)) continue;
+          tries++;
+          if (findPath(sx, sy, nx, ny, blocked).length > 0) {
+            v.retargetMove(nx, ny);   // posição livre próxima alcançável
+            return;
+          }
+        }
+      }
+    }
+    v.setIdle(); // nenhuma rota possível → cancela o movimento e para de andar
   }
 
   private _findBuilder(

@@ -75,6 +75,7 @@ export class Villager {
   private _moveTargetX: number | null = null;
   private _moveTargetY: number | null = null;
   private _path: PathTile[] = [];
+  private _noProgressTicks = 0;   // ticks sem avançar (detecção de "preso")
   private _gatherTargetId: string | null = null;
   private _gatherTargetX: number | null = null;
   private _gatherTargetY: number | null = null;
@@ -139,6 +140,22 @@ export class Villager {
   get dyingTickCounter(): number { return this._dyingTickCounter; }
   get moveTargetX(): number | null { return this._moveTargetX; }
   get moveTargetY(): number | null { return this._moveTargetY; }
+  get noProgressTicks(): number { return this._noProgressTicks; }
+
+  /** Atualiza o contador de "preso": zera ao avançar, incrementa ao não avançar. */
+  trackMovementProgress(moved: boolean): void {
+    if (moved) this._noProgressTicks = 0;
+    else this._noProgressTicks++;
+  }
+
+  /** Redireciona o destino do movimento (mantendo gather/construct), recalculando a rota. */
+  retargetMove(destX: number, destY: number): void {
+    this._moveTargetX = destX;
+    this._moveTargetY = destY;
+    this._path = [];
+    this._noProgressTicks = 0;
+    this._state = 'moving';
+  }
   get gatherTargetId(): string | null { return this._gatherTargetId; }
   get constructTargetId(): string | null { return this._constructTargetId; }
   get attackTargetId(): string | null { return this._attackTargetId; }
@@ -156,6 +173,7 @@ export class Villager {
     this._moveTargetX = destX;
     this._moveTargetY = destY;
     this._path = [];
+    this._noProgressTicks = 0;
     this._gatherTargetId = null;
     this._gatherTargetX = null;
     this._gatherTargetY = null;
@@ -176,6 +194,7 @@ export class Villager {
     this._moveTargetX = nodeX;
     this._moveTargetY = nodeY;
     this._path = [];
+    this._noProgressTicks = 0;
     this._constructTargetId = null;
     this._constructQueue = [];
     this._attackTargetId = null;
@@ -202,6 +221,7 @@ export class Villager {
     this._moveTargetX = destX;
     this._moveTargetY = destY;
     this._path = [];
+    this._noProgressTicks = 0;
     this._gatherTargetId = null;
     this._gatherTargetX = null;
     this._gatherTargetY = null;
