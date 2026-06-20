@@ -1154,10 +1154,10 @@ export class GameSession {
   }
 
   /**
-   * Colisão suave entre unidades: empurra para os lados pares que se sobrepõem,
-   * sem entrar em terreno/parede bloqueada. Evita o empilhamento e faz as tropas
-   * se distribuírem naturalmente ao redor dos inimigos durante o combate.
-   * Aplica-se a unidades em movimento/combate/ociosas (não aos trabalhadores).
+   * Colisão suave só na POSIÇÃO FINAL: separa unidades PARADAS que se sobrepõem
+   * (ociosas ou atacando no lugar), para que não ocupem exatamente o mesmo espaço.
+   * Unidades em deslocamento (movendo ou se aproximando do alvo) NÃO são empurradas
+   * e podem se atravessar livremente — movimentação fluida, sem congestionamento.
    */
   private _resolveUnitCollisions(): void {
     const blocked = (ownerId: string, x: number, y: number) =>
@@ -1167,7 +1167,7 @@ export class GameSession {
       u.nudge(dx, dy);
     };
     const units = Array.from(this._villagers.values()).filter(u =>
-      u.state === 'moving' || u.state === 'attacking' || u.state === 'idle');
+      u.state === 'idle' || (u.state === 'attacking' && u.attackInRange));
     for (let i = 0; i < units.length; i++) {
       for (let j = i + 1; j < units.length; j++) {
         const a = units[i], b = units[j];
