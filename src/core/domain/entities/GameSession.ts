@@ -337,13 +337,16 @@ export class GameSession {
     if (!building.isComplete) throw new Error('A construção ainda está em obras');
 
     if (building.type === 'farm') {
-      // Fazenda: o aldeão vai até um quadrado de plantação livre e fica trabalhando lá (visível).
-      if (this._farmReservedCount(buildingId) >= building.occupantCapacity) {
-        throw new Error('A Fazenda está cheia');
+      // Cada Fazenda comporta 1 aldeão. Se a escolhida já estiver ocupada/reservada,
+      // procura automaticamente outra Fazenda livre do jogador (não empilha na mesma).
+      let target: PlayerBuilding | null = building;
+      if (this._farmReservedCount(building.id) >= building.occupantCapacity) {
+        target = this._nearestAvailableFarm(playerId, villager.x, villager.y);
       }
-      const square = this._freeFarmSquare(building);
-      if (!square) throw new Error('A Fazenda está cheia');
-      villager.commandEnterBuilding(buildingId, square.x, square.y);
+      if (!target) throw new Error('Nenhuma Fazenda disponível');
+      const square = this._freeFarmSquare(target);
+      if (!square) throw new Error('Nenhuma Fazenda disponível');
+      villager.commandEnterBuilding(target.id, square.x, square.y);
       return;
     }
 
@@ -434,6 +437,23 @@ export class GameSession {
       }
     }
 
+    // Fazendas só podem ocupar uma das 8 vagas ao redor de um Moinho do jogador.
+    if (type === 'farm' && !this._isValidFarmSlot(playerId, x, y)) {
+      throw new Error('A Fazenda precisa ocupar um espaço ao redor de um Moinho');
+    }
+
+    // A área agrícola (Moinho + as 8 vagas de Fazenda em volta) é exclusiva: nenhuma
+    // outra construção pode invadi-la, mesmo com o Moinho ainda em obras.
+    if (type !== 'farm') {
+      for (let dy = 0; dy < config.height; dy++) {
+        for (let dx = 0; dx < config.width; dx++) {
+          if (this._isReservedAgriculturalTile(x + dx, y + dy)) {
+            throw new Error('Área reservada para o Moinho e suas Fazendas');
+          }
+        }
+      }
+    }
+
     const hpMult = ERA_HP_MULT[player.era] ?? 1.0;
     const building = new PlayerBuilding(uuidv4(), playerId, type, x, y, hpMult);
     this._playerBuildings.set(building.id, building);
@@ -465,6 +485,7 @@ export class GameSession {
     for (const c of cells) {
       if (!this._isTileWalkable(c.x, c.y)) throw new Error('Não é possível construir muro neste terreno');
       if (this._isTileOccupiedByBuilding(c.x, c.y)) throw new Error('Não é possível construir muro sobre outra construção');
+      if (this._isReservedAgriculturalTile(c.x, c.y)) throw new Error('Área reservada para o Moinho e suas Fazendas');
     }
 
     const config = BUILDING_CONFIGS.wall;
@@ -1111,6 +1132,40 @@ export class GameSession {
     return null;
   }
 
+  /**
+   * (x,y) é uma das 8 vagas 3×3 ao redor de um Moinho do jogador? As vagas formam
+   * um anel de blocos 3×3 em volta do "pátio" (bloco 3×3 central que contém o
+   * Moinho 1×1), garantindo até 8 Fazendas sem sobreposição.
+   */
+  private _isValidFarmSlot(playerId: string, x: number, y: number): boolean {
+    for (const m of this._playerBuildings.values()) {
+      // Só Moinhos CONCLUÍDOS liberam vagas de Fazenda ao redor.
+      if (m.type !== 'mill' || m.ownerId !== playerId || !m.isComplete) continue;
+      const ax = m.x - 1, ay = m.y - 1; // âncora do bloco central (pátio do moinho)
+      for (let dy = -1; dy <= 1; dy++) {
+        for (let dx = -1; dx <= 1; dx++) {
+          if (dx === 0 && dy === 0) continue;
+          if (x === ax + dx * 3 && y === ay + dy * 3) return true;
+        }
+      }
+    }
+    return false;
+  }
+
+  /**
+   * Área agrícola reservada de um Moinho: o tile do Moinho, o pátio em volta e as
+   * 8 vagas de Fazenda (3×3 cada) formam um quadrado 9×9 centrado no Moinho. Vale
+   * para Moinhos de qualquer dono e em QUALQUER estado — inclusive em obras — para
+   * que nenhuma outra construção invada o espaço reservado às Fazendas.
+   */
+  private _isReservedAgriculturalTile(x: number, y: number): boolean {
+    for (const m of this._playerBuildings.values()) {
+      if (m.type !== 'mill') continue;
+      if (x >= m.x - 4 && x <= m.x + 4 && y >= m.y - 4 && y <= m.y + 4) return true;
+    }
+    return false;
+  }
+
   private _getTargetOwner(targetId: string, kind: AttackTargetKind): string | null {
     if (kind === 'unit') return this._villagers.get(targetId)?.ownerId ?? null;
     if (kind === 'building') return this._playerBuildings.get(targetId)?.ownerId ?? null;
@@ -1315,6 +1370,19 @@ export class GameSession {
       if (v.farmTargetId === farmId || v.pendingEnterBuildingId === farmId) n++;
     }
     return n;
+  }
+
+  /** Fazenda concluída do jogador, com vaga livre, mais próxima de (x,y). */
+  private _nearestAvailableFarm(playerId: string, x: number, y: number): PlayerBuilding | null {
+    let best: PlayerBuilding | null = null;
+    let bestD = Infinity;
+    for (const f of this._playerBuildings.values()) {
+      if (f.type !== 'farm' || f.ownerId !== playerId || !f.isComplete) continue;
+      if (this._farmReservedCount(f.id) >= f.occupantCapacity) continue; // já ocupada/reservada
+      const d = Math.abs(f.x - x) + Math.abs(f.y - y);
+      if (d < bestD) { bestD = d; best = f; }
+    }
+    return best;
   }
 
   /** Um quadrado de plantação livre (perímetro do 3×3, exceto o moinho central). */

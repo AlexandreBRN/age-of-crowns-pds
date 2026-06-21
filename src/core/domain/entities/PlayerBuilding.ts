@@ -3,6 +3,7 @@ export type PlayerBuildingType =
   | 'gate'
   | 'watchtower'
   | 'house'
+  | 'mill'
   | 'lumber_camp'
   | 'gold_mine'
   | 'farm'
@@ -89,6 +90,15 @@ export const BUILDING_CONFIGS: Record<PlayerBuildingType, BuildingConfig> = {
     populationBonus: POPULATION_PER_HOUSE,
     blocksMovement: true,
   },
+  mill: {
+    label: 'Moinho',
+    description: 'Centro agrícola — permite até 8 Fazendas, uma em cada tile ao redor.',
+    width: 1, height: 1,
+    cost: { wood: 25 },
+    constructionTicks: 12,
+    maxHp: 180,
+    blocksMovement: true,
+  },
   lumber_camp: {
     label: 'Serraria',
     description: 'Gera madeira enquanto houver aldeões trabalhando dentro.',
@@ -113,14 +123,14 @@ export const BUILDING_CONFIGS: Record<PlayerBuildingType, BuildingConfig> = {
   },
   farm: {
     label: 'Fazenda',
-    description: 'Moinho central cercado por 8 lavouras — até 8 aldeões trabalham visíveis.',
-    width: 3, height: 3,
-    cost: { wood: 40 },
-    constructionTicks: 16,
-    maxHp: 200,
+    description: 'Lavoura construída ao lado de um Moinho — 1 aldeão colhe comida.',
+    width: 3, height: 3,        // tamanho original (antes do sistema de Moinho)
+    cost: { wood: 15 },
+    constructionTicks: 10,
+    maxHp: 120,
     generates: { food: 4 },
-    occupantCapacity: 8,        // 8 quadrados de plantação ao redor do moinho
-    blocksMovement: false,      // aldeões ficam nas lavouras (tiles andáveis)
+    occupantCapacity: 1,        // só 1 aldeão por Fazenda
+    blocksMovement: false,      // o aldeão fica na lavoura (tile andável)
   },
   stone_quarry: {
     label: 'Pedreira',
