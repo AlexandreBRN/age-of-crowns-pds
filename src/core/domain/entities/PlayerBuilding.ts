@@ -92,8 +92,8 @@ export const BUILDING_CONFIGS: Record<PlayerBuildingType, BuildingConfig> = {
   },
   mill: {
     label: 'Moinho',
-    description: 'Centro agrícola — permite até 8 Fazendas, uma em cada tile ao redor.',
-    width: 1, height: 1,
+    description: 'Centro agrícola — permite até 8 Fazendas, uma em cada espaço ao redor.',
+    width: 2, height: 2,        // mesmo tamanho da Fazenda (4 tiles)
     cost: { wood: 25 },
     constructionTicks: 12,
     maxHp: 180,
@@ -124,7 +124,7 @@ export const BUILDING_CONFIGS: Record<PlayerBuildingType, BuildingConfig> = {
   farm: {
     label: 'Fazenda',
     description: 'Lavoura construída ao lado de um Moinho — 1 aldeão colhe comida.',
-    width: 3, height: 3,        // tamanho original (antes do sistema de Moinho)
+    width: 2, height: 2,        // mesmo tamanho do Moinho (4 tiles)
     cost: { wood: 15 },
     constructionTicks: 10,
     maxHp: 120,

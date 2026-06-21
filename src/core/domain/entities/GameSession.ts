@@ -454,6 +454,23 @@ export class GameSession {
       }
     }
 
+    // O Moinho só pode ser erguido se TODA a sua área agrícola (o Moinho 2×2 + as
+    // 8 vagas de Fazenda em volta = um quadrado 6×6) couber: terreno andável, livre
+    // de construções e fora da reserva de outro Moinho. Sem espaço para as Fazendas,
+    // o Moinho não é permitido.
+    if (type === 'mill') {
+      for (let ty = y - 2; ty <= y + 3; ty++) {
+        for (let tx = x - 2; tx <= x + 3; tx++) {
+          if (!this._isTileWalkable(tx, ty)) {
+            throw new Error('Espaço insuficiente: as Fazendas do Moinho não cabem aqui');
+          }
+          if (this._isTileOccupiedByBuilding(tx, ty)) {
+            throw new Error('Espaço insuficiente: há construções na área das Fazendas');
+          }
+        }
+      }
+    }
+
     const hpMult = ERA_HP_MULT[player.era] ?? 1.0;
     const building = new PlayerBuilding(uuidv4(), playerId, type, x, y, hpMult);
     this._playerBuildings.set(building.id, building);
@@ -1141,11 +1158,12 @@ export class GameSession {
     for (const m of this._playerBuildings.values()) {
       // Só Moinhos CONCLUÍDOS liberam vagas de Fazenda ao redor.
       if (m.type !== 'mill' || m.ownerId !== playerId || !m.isComplete) continue;
-      const ax = m.x - 1, ay = m.y - 1; // âncora do bloco central (pátio do moinho)
+      // Moinho e Fazendas são 2×2: o Moinho é o bloco central e as 8 vagas (2×2 cada)
+      // formam o anel ao redor, deslocadas de 2 tiles — tudo dentro de um 6×6.
       for (let dy = -1; dy <= 1; dy++) {
         for (let dx = -1; dx <= 1; dx++) {
           if (dx === 0 && dy === 0) continue;
-          if (x === ax + dx * 3 && y === ay + dy * 3) return true;
+          if (x === m.x + dx * 2 && y === m.y + dy * 2) return true;
         }
       }
     }
@@ -1161,7 +1179,8 @@ export class GameSession {
   private _isReservedAgriculturalTile(x: number, y: number): boolean {
     for (const m of this._playerBuildings.values()) {
       if (m.type !== 'mill') continue;
-      if (x >= m.x - 4 && x <= m.x + 4 && y >= m.y - 4 && y <= m.y + 4) return true;
+      // Moinho 2×2 no centro + anel de 8 vagas 2×2 = quadrado 6×6 [m.x-2, m.x+3].
+      if (x >= m.x - 2 && x <= m.x + 3 && y >= m.y - 2 && y <= m.y + 3) return true;
     }
     return false;
   }
@@ -1385,7 +1404,7 @@ export class GameSession {
     return best;
   }
 
-  /** Um quadrado de plantação livre (perímetro do 3×3, exceto o moinho central). */
+  /** Um tile de plantação livre dentro da Fazenda 2×2 onde o aldeão fica colhendo. */
   private _freeFarmSquare(farm: PlayerBuilding): { x: number; y: number } | null {
     const taken = new Set<string>();
     for (const v of this._villagers.values()) {
@@ -1394,9 +1413,7 @@ export class GameSession {
         taken.add(`${v.moveTargetX},${v.moveTargetY}`);
       }
     }
-    const millX = farm.x + 1, millY = farm.y + 1; // centro 3×3 = moinho
     for (const t of farm.occupiedTiles) {
-      if (t.x === millX && t.y === millY) continue;        // pula o moinho
       if (taken.has(`${t.x},${t.y}`)) continue;
       if (!this._isTileWalkable(t.x, t.y)) continue;
       return { x: t.x, y: t.y };

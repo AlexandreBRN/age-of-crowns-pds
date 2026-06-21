@@ -37,10 +37,10 @@ const BUILDING_DEFS = {
   gate:         { label:'Portão',         width:1, height:1, cost:{wood:10,stone:5},   color:'#7a5a30' },
   watchtower:   { label:'Torre de Vigia', width:1, height:1, cost:{stone:20,wood:10},   color:'#b09070' },
   house:        { label:'Casa',           width:2, height:2, cost:{wood:25},            color:'#9a6a3a' },
-  mill:         { label:'Moinho',         width:1, height:1, cost:{wood:25},            color:'#caa050' },
+  mill:         { label:'Moinho',         width:2, height:2, cost:{wood:25},            color:'#caa050' },
   lumber_camp:  { label:'Serraria',       width:2, height:2, cost:{wood:30,stone:5},    color:'#5a7030' },
   gold_mine:    { label:'Mina de Ouro',   width:2, height:2, cost:{stone:40,wood:20},   color:'#c09020' },
-  farm:         { label:'Fazenda',        width:3, height:3, cost:{wood:15},            color:'#88a030' },
+  farm:         { label:'Fazenda',        width:2, height:2, cost:{wood:15},            color:'#88a030' },
   stone_quarry: { label:'Pedreira',       width:2, height:2, cost:{wood:30,stone:10},   color:'#808080' },
 };
 
@@ -1892,9 +1892,9 @@ function renderPlayerBuilding(snapshot, b) {
     }
 
     case 'farm': {
-      // Campo de cultivo 3×3 (tamanho original). O aldeão fica visível na lavoura.
-      for (let dy = 0; dy < 3; dy++) {
-        for (let dx = 0; dx < 3; dx++) {
+      // Campo de cultivo: desenha exatamente o footprint da Fazenda (2×2).
+      for (let dy = 0; dy < h; dy++) {
+        for (let dx = 0; dx < w; dx++) {
           const tx = b.x + dx, ty = b.y + dy;
           const t = worldToScreen(tx, ty), r = worldToScreen(tx + 1, ty);
           const bo = worldToScreen(tx + 1, ty + 1), l = worldToScreen(tx, ty + 1);
@@ -2030,11 +2030,11 @@ function renderFarmPlacementHints() {
   ctx.save();
   for (const m of ownMills()) {
     for (const slot of millFarmSlots(m)) {
-      const free = isTileRangeWalkable(slot.x, slot.y, 3, 3);
+      const free = isTileRangeWalkable(slot.x, slot.y, 2, 2);
       const top    = worldToScreen(slot.x,     slot.y);
-      const right  = worldToScreen(slot.x + 3, slot.y);
-      const bottom = worldToScreen(slot.x + 3, slot.y + 3);
-      const left   = worldToScreen(slot.x,     slot.y + 3);
+      const right  = worldToScreen(slot.x + 2, slot.y);
+      const bottom = worldToScreen(slot.x + 2, slot.y + 2);
+      const left   = worldToScreen(slot.x,     slot.y + 2);
       ctx.beginPath();
       ctx.moveTo(top.sx, top.sy); ctx.lineTo(right.sx, right.sy);
       ctx.lineTo(bottom.sx, bottom.sy); ctx.lineTo(left.sx, left.sy); ctx.closePath();
@@ -2135,7 +2135,10 @@ function renderBuildingGhost() {
   // A área agrícola reservada bloqueia qualquer construção que não seja Fazenda.
   const reservedHit = G.placingBuildingType !== 'farm'
     && footprintHitsReserved(tx, ty, def.width, def.height);
-  const valid = canAfford && isTileRangeWalkable(tx, ty, def.width, def.height) && millOk && !reservedHit;
+  // O Moinho exige a área 6×6 inteira livre para suas futuras Fazendas.
+  const millAreaOk = G.placingBuildingType !== 'mill' || millAreaPlaceable(tx, ty);
+  const valid = canAfford && isTileRangeWalkable(tx, ty, def.width, def.height)
+    && millOk && !reservedHit && millAreaOk;
 
   const top    = worldToScreen(tx,             ty);
   const right  = worldToScreen(tx + def.width, ty);
@@ -2206,15 +2209,14 @@ function ownMills() {
     b.type === 'mill' && b.ownerId === G.playerId && b.status === 'complete');
 }
 
-// As 8 vagas 3×3 (âncoras) ao redor de um Moinho 1×1 — anel de blocos em volta do
-// pátio central (que contém o moinho), sem sobreposição entre elas nem com o moinho.
+// As 8 vagas 2×2 (âncoras) ao redor de um Moinho 2×2 — anel de blocos em volta do
+// Moinho (bloco central), deslocados de 2 tiles, sem sobreposição (tudo num 6×6).
 function millFarmSlots(m) {
-  const ax = m.x - 1, ay = m.y - 1; // âncora do bloco central (pátio)
   const slots = [];
   for (let dy = -1; dy <= 1; dy++) {
     for (let dx = -1; dx <= 1; dx++) {
       if (dx === 0 && dy === 0) continue;
-      slots.push({ x: ax + dx * 3, y: ay + dy * 3 });
+      slots.push({ x: m.x + dx * 2, y: m.y + dy * 2 });
     }
   }
   return slots;
@@ -2226,11 +2228,11 @@ function snappedFarmAnchor(tx, ty) {
   let best = null, bestD = Infinity;
   for (const m of ownMills()) {
     for (const slot of millFarmSlots(m)) {
-      const d = Math.hypot((slot.x + 1.5) - (tx + 0.5), (slot.y + 1.5) - (ty + 0.5));
+      const d = Math.hypot((slot.x + 1) - (tx + 0.5), (slot.y + 1) - (ty + 0.5));
       if (d < bestD) { bestD = d; best = slot; }
     }
   }
-  return best && bestD <= 5 ? best : null;
+  return best && bestD <= 4 ? best : null;
 }
 
 function isTileOccupied(tx, ty) {
@@ -2259,7 +2261,8 @@ function isTileOccupied(tx, ty) {
 function isReservedAgriculturalTile(tx, ty) {
   for (const b of G.snapshot?.playerBuildings ?? []) {
     if (b.type !== 'mill') continue;
-    if (tx >= b.x - 4 && tx <= b.x + 4 && ty >= b.y - 4 && ty <= b.y + 4) return true;
+    // Moinho 2×2 + anel de 8 vagas 2×2 = quadrado 6×6 [b.x-2, b.x+3].
+    if (tx >= b.x - 2 && tx <= b.x + 3 && ty >= b.y - 2 && ty <= b.y + 3) return true;
   }
   return false;
 }
@@ -2272,6 +2275,17 @@ function footprintHitsReserved(tx, ty, w, h) {
     }
   }
   return false;
+}
+
+// O Moinho só cabe se TODA a sua área agrícola (Moinho 2×2 + as 8 vagas de Fazenda
+// = quadrado 6×6 [tx-2, tx+3]) estiver livre: terreno andável e sem construções.
+function millAreaPlaceable(tx, ty) {
+  for (let y = ty - 2; y <= ty + 3; y++) {
+    for (let x = tx - 2; x <= tx + 3; x++) {
+      if (!isTileRangeWalkable(x, y, 1, 1)) return false;
+    }
+  }
+  return true;
 }
 
 function canAffordBuilding(type) {
@@ -2820,7 +2834,8 @@ function setupInput() {
       }
       const reservedHit = G.placingBuildingType !== 'farm'
         && def && footprintHitsReserved(px, py, def.width, def.height);
-      if (def && millOk && !reservedHit && isTileRangeWalkable(px, py, def.width, def.height) && canAffordBuilding(G.placingBuildingType)) {
+      const millAreaOk = G.placingBuildingType !== 'mill' || millAreaPlaceable(px, py);
+      if (def && millOk && !reservedHit && millAreaOk && isTileRangeWalkable(px, py, def.width, def.height) && canAffordBuilding(G.placingBuildingType)) {
         const villagerId = G.selectedIds.size === 1 ? [...G.selectedIds][0] : undefined;
         send({ type: 'place_building', buildingType: G.placingBuildingType, x: px, y: py, villagerId });
         if (!e.shiftKey) cancelPlacingMode();
@@ -2828,6 +2843,8 @@ function setupInput() {
         setHudStatus('⚠ A Fazenda precisa ocupar um espaço ao redor de um Moinho');
       } else if (reservedHit) {
         setHudStatus('⚠ Área reservada para o Moinho e suas Fazendas');
+      } else if (!millAreaOk) {
+        setHudStatus('⚠ Espaço insuficiente para o Moinho e suas Fazendas');
       }
       return;
     }
