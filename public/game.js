@@ -1575,13 +1575,17 @@ function renderTowerGarrison(b) {
   // As flechas reais são projéteis do servidor (renderProjectiles), não mais um efeito decorativo aqui.
 }
 
-// Altura (px) de onde a flecha sai: alto da Torre de Vigia, ou da mão do arqueiro.
-const TOWER_ARROW_LAUNCH_H = 66;
+// Altura (px) de onde a flecha sai: bem no topo da Torre de Vigia (a torre é
+// desenhada com ~110px de altura, então as flechas saem lá em cima, junto dos
+// arqueiros guarnecidos), ou da mão do arqueiro a pé.
+const TOWER_ARROW_LAUNCH_H = 120;
 const UNIT_ARROW_LAUNCH_H = 14;
 
 // Posição de tela de uma flecha num dado progresso (0..1) do voo lançamento→alvo.
-// A altura começa na origem (topo da torre / mão do arqueiro), sobe levemente e
-// desce até o chão do alvo — arco assimétrico, como uma flecha de verdade.
+// A trajetória é um arco: começa na altura de lançamento (topo da torre / mão do
+// arqueiro), SOBE até um ápice acima dela e depois DESCE até o chão do alvo. O
+// termo linear leva de launchH a 0; o termo senoidal (arcMax) é a curva do arco
+// por cima dessa linha — com arcMax > launchH/π o ápice fica acima do lançamento.
 function arrowScreenAt(p, prog, arcMax) {
   const wx = p.fx + (p.tx - p.fx) * prog;
   const wy = p.fy + (p.ty - p.fy) * prog;
@@ -1605,9 +1609,13 @@ function renderProjectiles() {
 
     const total = Math.hypot(p.tx - p.fx, p.ty - p.fy) || 1;
     const prog  = Math.max(0, Math.min(1, Math.hypot(gx - p.fx, gy - p.fy) / total));
-    // Subida suave por cima da altura de lançamento (sobe levemente após o disparo,
-    // mesmo em alvos próximos, e depois desce até o chão).
-    const arcMax = Math.min(34, 16 + total * 3);
+    // Altura do arco. Para a flecha da torre SUBIR primeiro (ápice acima do topo
+    // da torre) e só então cair, o arco precisa ser maior que a altura de lançamento
+    // (launchH/π ≈ 38px); por isso a torre usa uma base bem mais alta que o arqueiro
+    // a pé. Cresce com a distância para arcos mais longos render trajetórias amplas.
+    const arcMax = p.elevated
+      ? 80 + Math.min(50, total * 6)
+      : 22 + Math.min(40, total * 5);
 
     // Ponto atual e um logo à frente → orienta a flecha pela tangente do arco.
     const cur   = arrowScreenAt(p, prog, arcMax);
