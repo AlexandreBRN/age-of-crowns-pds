@@ -71,6 +71,12 @@ const SPAWN_CONFIGS = [
 const GATHER_INTERVAL_TICKS = 4;
 const BUILDING_GEN_INTERVAL_TICKS = 8;
 
+// Com que frequência (ticks) os aldeões trocam de ponto dentro da lavoura e a
+// chance de cada um se mexer no ciclo — assim eles vagam pela Fazenda em vez de
+// ficarem plantados num único tile, sem todos andarem ao mesmo tempo.
+const FARM_WANDER_INTERVAL_TICKS = 12;
+const FARM_WANDER_CHANCE = 0.6;
+
 // ─────────────────────────────────────────────────────────────────────────────
 // DEV/TESTE — configuração TEMPORÁRIA para acelerar a validação de mecânicas.
 // A cada nova partida o jogador já começa com tropas prontas e recursos de sobra,
@@ -883,6 +889,21 @@ export class GameSession {
       }
     }
 
+    // ── Aldeões nas Fazendas vagam pela lavoura ──────────────────────────────
+    // Quem já está colhendo (parado em 'gathering') troca de ponto dentro da
+    // própria Fazenda de tempos em tempos, dando vida à cena. Continua contando
+    // como trabalhador (a produção não para — é medida por `farmTargetId`).
+    if (this._tick % FARM_WANDER_INTERVAL_TICKS === 0) {
+      for (const v of this._villagers.values()) {
+        if (v.farmTargetId === null || v.state !== 'gathering') continue;
+        if (Math.random() >= FARM_WANDER_CHANCE) continue;
+        const farm = this._playerBuildings.get(v.farmTargetId);
+        if (!farm) continue;
+        const spot = this._randomFarmTile(farm, v.x, v.y);
+        if (spot) v.farmWanderTo(spot.x, spot.y);
+      }
+    }
+
     // ── Town center training ──────────────────────────────────────────────────
     for (const tc of this._townCenters.values()) {
       if (!tc.isTraining) continue;
@@ -1419,6 +1440,15 @@ export class GameSession {
       return { x: t.x, y: t.y };
     }
     return null;
+  }
+
+  /** Um tile andável aleatório da Fazenda, diferente de onde o aldeão está agora. */
+  private _randomFarmTile(farm: PlayerBuilding, curX: number, curY: number): { x: number; y: number } | null {
+    const cx = Math.round(curX), cy = Math.round(curY);
+    const options = farm.occupiedTiles.filter(t =>
+      this._isTileWalkable(t.x, t.y) && !(t.x === cx && t.y === cy));
+    if (options.length === 0) return null;
+    return options[Math.floor(Math.random() * options.length)];
   }
 
   /** Tira todas as unidades de dentro de uma construção e as recoloca em volta. */

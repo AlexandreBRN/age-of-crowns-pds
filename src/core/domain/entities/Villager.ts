@@ -253,6 +253,19 @@ export class Villager {
     this._state = 'gathering';
   }
 
+  /**
+   * Caminha até outro ponto da PRÓPRIA lavoura sem deixar de ser trabalhador da
+   * Fazenda (mantém `_farmTargetId`). Ao chegar, `stepTowardTarget` o devolve ao
+   * estado 'gathering'. Só vale para quem já está colhendo numa Fazenda.
+   */
+  farmWanderTo(x: number, y: number): void {
+    if (this._farmTargetId === null) return;
+    this._moveTargetX = x;
+    this._moveTargetY = y;
+    this._path = [];
+    this._state = 'moving';
+  }
+
   /** Caminha até a construção para entrar nela ao chegar. */
   commandEnterBuilding(buildingId: string, destX: number, destY: number): void {
     this.commandMove(destX, destY);
@@ -379,6 +392,11 @@ export class Villager {
         this._moveTargetX = null;
         this._moveTargetY = null;
       } else if (this._gatherTargetId !== null) {
+        this._state = 'gathering';
+        this._moveTargetX = null;
+        this._moveTargetY = null;
+      } else if (this._farmTargetId !== null) {
+        // Chegou ao novo ponto da lavoura: volta a colher (animação de coleta).
         this._state = 'gathering';
         this._moveTargetX = null;
         this._moveTargetY = null;
