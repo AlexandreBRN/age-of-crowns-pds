@@ -21,6 +21,7 @@ interface Projectile {
   id: string;
   ownerId: string;
   x: number; y: number;          // posição atual (tiles)
+  fx: number; fy: number;        // posição de lançamento (para o arco/orientação)
   targetId: string;
   targetKind: AttackTargetKind;
   damage: number;
@@ -937,7 +938,7 @@ export class GameSession {
         }
         return b.toJSON();
       }),
-      projectiles: Array.from(this._projectiles.values()).map(p => ({ id: p.id, x: p.x, y: p.y, tx: p.tx, ty: p.ty })),
+      projectiles: Array.from(this._projectiles.values()).map(p => ({ id: p.id, x: p.x, y: p.y, fx: p.fx, fy: p.fy, tx: p.tx, ty: p.ty })),
     };
   }
 
@@ -1142,7 +1143,7 @@ export class GameSession {
   private _spawnArrow(fromX: number, fromY: number, targetId: string, kind: AttackTargetKind, ownerId: string, damage: number): void {
     const id = uuidv4();
     this._projectiles.set(id, {
-      id, ownerId, x: fromX, y: fromY, targetId, targetKind: kind, damage, tx: fromX, ty: fromY,
+      id, ownerId, x: fromX, y: fromY, fx: fromX, fy: fromY, targetId, targetKind: kind, damage, tx: fromX, ty: fromY,
     });
   }
 

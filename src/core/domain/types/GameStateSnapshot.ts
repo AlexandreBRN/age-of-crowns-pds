@@ -72,6 +72,7 @@ export interface PlayerBuildingDTO {
 export interface ProjectileDTO {
   id: string;
   x: number; y: number;               // posição atual (tiles)
+  fx: number; fy: number;             // posição de lançamento (arco/orientação)
   tx: number; ty: number;             // posição do alvo (direção do voo)
 }
 

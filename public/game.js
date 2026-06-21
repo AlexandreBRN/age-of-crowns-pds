@@ -190,6 +190,7 @@ const G = {
   spritesReady: false,
   villagerDir: new Map(),     // villagerId → last facing direction key ('1'..'8')
   villagerPrevPos: new Map(), // villagerId → {x, y} from previous snapshot
+  projectilePrevPos: new Map(), // arrowId → {x, y} from previous snapshot (interpolação)
   lastSnapshotTime: 0,        // performance.now() at last state_update arrival
 
   // Pre-rendered terrain sprite variants (built once at startup)
@@ -673,6 +674,12 @@ function handleMessage(msg) {
           }
         }
         for (const id of G.villagerPrevPos.keys()) if (!liveIds.has(id)) G.villagerPrevPos.delete(id);
+        // Mesma interpolação para as flechas (voo suave entre ticks).
+        const liveArrows = new Set((msg.snapshot.projectiles ?? []).map(p => p.id));
+        for (const p of G.snapshot.projectiles ?? []) {
+          if (liveArrows.has(p.id)) G.projectilePrevPos.set(p.id, { x: p.x, y: p.y });
+        }
+        for (const id of G.projectilePrevPos.keys()) if (!liveArrows.has(id)) G.projectilePrevPos.delete(id);
       }
       detectEraAdvances(msg.snapshot);
       G.snapshot = msg.snapshot;
@@ -694,6 +701,7 @@ function handleMessage(msg) {
       G.revealedTiles = new Set();
       G.visibleTiles = new Set();
       G.villagerPrevPos.clear();
+      G.projectilePrevPos.clear();
       G.selectedIds.clear();
       G.selectedBuildingId = null;
       cancelPlacingMode();
@@ -1565,27 +1573,57 @@ function renderTowerGarrison(b) {
   // As flechas reais são projéteis do servidor (renderProjectiles), não mais um efeito decorativo aqui.
 }
 
-// Flechas reais em voo (projéteis do servidor). Cada arqueiro guarnecido dispara a
-// sua própria, então uma torre cheia mostra uma verdadeira saraivada.
+// Posição de tela de uma flecha num dado progresso (0..1) do voo lançamento→alvo,
+// já com o arco de besta (parábola) somado na vertical.
+function arrowScreenAt(p, prog, arcMax) {
+  const wx = p.fx + (p.tx - p.fx) * prog;
+  const wy = p.fy + (p.ty - p.fy) * prog;
+  const s = worldToScreen(wx + 0.5, wy + 0.5);
+  return { x: s.sx, y: s.sy + TILE_H / 2 - Math.sin(prog * Math.PI) * arcMax };
+}
+
+// Flechas reais em voo (projéteis do servidor): seta nítida, orientada pela
+// tangente da trajetória (arco de disparo), com voo suave interpolado entre ticks.
 function renderProjectiles() {
   if (!G.snapshot) return;
   const ctx = G.ctx;
+  const t = Math.min(1, (performance.now() - G.lastSnapshotTime) / SERVER_TICK_MS);
   for (const p of G.snapshot.projectiles ?? []) {
-    const pos = worldToScreen(p.x + 0.5, p.y + 0.5);
-    const tgt = worldToScreen(p.tx + 0.5, p.ty + 0.5);
-    const ang = Math.atan2(tgt.sy - pos.sy, tgt.sx - pos.sx);
+    // Interpola a posição no chão entre o snapshot anterior e o atual (sem "pulos").
+    const prev = G.projectilePrevPos.get(p.id);
+    const gx = prev ? prev.x + (p.x - prev.x) * t : p.x;
+    const gy = prev ? prev.y + (p.y - prev.y) * t : p.y;
+
+    const total = Math.hypot(p.tx - p.fx, p.ty - p.fy) || 1;
+    const prog  = Math.max(0, Math.min(1, Math.hypot(gx - p.fx, gy - p.fy) / total));
+    const arcMax = Math.min(46, 12 + total * 5); // arco maior em disparos longos
+
+    // Ponto atual e um logo à frente → orienta a flecha pela tangente do arco.
+    const cur   = arrowScreenAt(p, prog, arcMax);
+    const ahead = arrowScreenAt(p, Math.min(1, prog + 0.05), arcMax);
+    const ang = Math.atan2(ahead.y - cur.y, ahead.x - cur.x);
+
     ctx.save();
-    ctx.translate(pos.sx, pos.sy + TILE_H / 2 - 6); // leve elevação (flecha no ar)
+    ctx.translate(cur.x, cur.y);
     ctx.rotate(ang);
-    // haste
-    ctx.strokeStyle = '#e8d0a0'; ctx.lineWidth = 2;
-    ctx.beginPath(); ctx.moveTo(-7, 0); ctx.lineTo(6, 0); ctx.stroke();
-    // ponta
-    ctx.fillStyle = '#fff';
-    ctx.beginPath(); ctx.moveTo(9, 0); ctx.lineTo(3, -3); ctx.lineTo(3, 3); ctx.closePath(); ctx.fill();
-    // penas
-    ctx.strokeStyle = '#c08040'; ctx.lineWidth = 1.5;
-    ctx.beginPath(); ctx.moveTo(-7, 0); ctx.lineTo(-10, -3); ctx.moveTo(-7, 0); ctx.lineTo(-10, 3); ctx.stroke();
+    // sombra/contorno sutil
+    ctx.lineCap = 'round';
+    // haste de madeira
+    ctx.strokeStyle = '#6b4a2a'; ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.moveTo(-10, 0); ctx.lineTo(7, 0); ctx.stroke();
+    // ponta de metal (triângulo claro)
+    ctx.fillStyle = '#dfe2ea';
+    ctx.beginPath(); ctx.moveTo(13, 0); ctx.lineTo(5, -3.5); ctx.lineTo(5, 3.5); ctx.closePath(); ctx.fill();
+    ctx.strokeStyle = '#9aa0ad'; ctx.lineWidth = 0.7; ctx.stroke();
+    // empenas (penas) na traseira
+    ctx.strokeStyle = '#c8463a'; ctx.lineWidth = 1.6;
+    ctx.beginPath();
+    ctx.moveTo(-10, 0); ctx.lineTo(-13, -3.5);
+    ctx.moveTo(-10, 0); ctx.lineTo(-13, 3.5);
+    ctx.moveTo(-7, 0);  ctx.lineTo(-10, -2.5);
+    ctx.moveTo(-7, 0);  ctx.lineTo(-10, 2.5);
+    ctx.stroke();
+    ctx.lineCap = 'butt';
     ctx.restore();
   }
 }
