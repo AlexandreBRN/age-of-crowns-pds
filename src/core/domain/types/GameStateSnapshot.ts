@@ -74,6 +74,7 @@ export interface ProjectileDTO {
   x: number; y: number;               // posição atual (tiles)
   fx: number; fy: number;             // posição de lançamento (arco/orientação)
   tx: number; ty: number;             // posição do alvo (direção do voo)
+  elevated: boolean;                  // sai do alto da torre (true) ou da mão do arqueiro (false)
 }
 
 export interface GameStateSnapshot {

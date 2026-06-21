@@ -1573,13 +1573,20 @@ function renderTowerGarrison(b) {
   // As flechas reais são projéteis do servidor (renderProjectiles), não mais um efeito decorativo aqui.
 }
 
-// Posição de tela de uma flecha num dado progresso (0..1) do voo lançamento→alvo,
-// já com o arco de besta (parábola) somado na vertical.
+// Altura (px) de onde a flecha sai: alto da Torre de Vigia, ou da mão do arqueiro.
+const TOWER_ARROW_LAUNCH_H = 66;
+const UNIT_ARROW_LAUNCH_H = 14;
+
+// Posição de tela de uma flecha num dado progresso (0..1) do voo lançamento→alvo.
+// A altura começa na origem (topo da torre / mão do arqueiro), sobe levemente e
+// desce até o chão do alvo — arco assimétrico, como uma flecha de verdade.
 function arrowScreenAt(p, prog, arcMax) {
   const wx = p.fx + (p.tx - p.fx) * prog;
   const wy = p.fy + (p.ty - p.fy) * prog;
   const s = worldToScreen(wx + 0.5, wy + 0.5);
-  return { x: s.sx, y: s.sy + TILE_H / 2 - Math.sin(prog * Math.PI) * arcMax };
+  const launchH = p.elevated ? TOWER_ARROW_LAUNCH_H : UNIT_ARROW_LAUNCH_H;
+  const height = launchH * (1 - prog) + Math.sin(prog * Math.PI) * arcMax;
+  return { x: s.sx, y: s.sy + TILE_H / 2 - height };
 }
 
 // Flechas reais em voo (projéteis do servidor): seta nítida, orientada pela
@@ -1596,7 +1603,9 @@ function renderProjectiles() {
 
     const total = Math.hypot(p.tx - p.fx, p.ty - p.fy) || 1;
     const prog  = Math.max(0, Math.min(1, Math.hypot(gx - p.fx, gy - p.fy) / total));
-    const arcMax = Math.min(46, 12 + total * 5); // arco maior em disparos longos
+    // Subida suave por cima da altura de lançamento (sobe levemente após o disparo,
+    // mesmo em alvos próximos, e depois desce até o chão).
+    const arcMax = Math.min(34, 16 + total * 3);
 
     // Ponto atual e um logo à frente → orienta a flecha pela tangente do arco.
     const cur   = arrowScreenAt(p, prog, arcMax);

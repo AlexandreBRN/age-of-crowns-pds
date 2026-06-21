@@ -26,6 +26,7 @@ interface Projectile {
   targetKind: AttackTargetKind;
   damage: number;
   tx: number; ty: number;        // última posição conhecida do alvo (para o render)
+  elevated: boolean;             // true = sai do alto da torre; false = da mão do arqueiro
 }
 
 const ARROW_SPEED = 1.4;         // tiles por tick
@@ -684,10 +685,16 @@ export class GameSession {
       attacker.setAttackInRange(inRange);
 
       if (inRange) {
-        // In range: deal damage on cooldown (dano escalado pela era do atacante)
+        // No alcance, ataca no cooldown. À distância (arqueiro) dispara uma FLECHA
+        // real que sai da unidade e só causa dano ao atingir o alvo; corpo a corpo
+        // (alcance 1) golpeia direto.
         attacker.incrementAttackCounter();
         if (attacker.attackTickCounter >= cfg.attackCooldownTicks) {
-          this._applyDamage(curId, curKind, attacker.attackDamage);
+          if (cfg.attackRange > 1) {
+            this._spawnArrow(attacker.x, attacker.y, curId, curKind, attacker.ownerId, attacker.attackDamage, false);
+          } else {
+            this._applyDamage(curId, curKind, attacker.attackDamage);
+          }
           attacker.resetAttackCounter();
         }
         continue;
@@ -778,12 +785,20 @@ export class GameSession {
       if (!targetId) { tower.clearTowerTarget(); continue; }
       tower.setTowerTarget(targetId);
       if (tower.canTowerFire) {
-        // Cada arqueiro guarnecido dispara a SUA própria flecha (1 arqueiro = 1 flecha,
-        // 3 arqueiros = 3 flechas simultâneas). O dano de cada uma é aplicado no impacto.
-        const cx = tower.x + 0.5, cy = tower.y + 0.5;
-        for (const archer of garrison) {
-          this._spawnArrow(cx, cy, targetId, 'unit', tower.ownerId, archer.attackDamage);
+        // Saraivada: cada arqueiro guarnecido dispara a SUA própria flecha (N arqueiros
+        // = N flechas), simultaneamente. As flechas saem em LEQUE (espalhadas na lateral
+        // da linha de tiro) para serem visíveis e convergem no alvo. Dano por flecha.
+        const tpos = this._getTargetCenter(targetId, 'unit');
+        let perpX = 0, perpY = 1;
+        if (tpos) {
+          const dx = tpos.x - cx, dy = tpos.y - cy, d = Math.hypot(dx, dy) || 1;
+          perpX = -dy / d; perpY = dx / d; // perpendicular unitário à direção do tiro
         }
+        const n = garrison.length;
+        garrison.forEach((archer, i) => {
+          const spread = (i - (n - 1) / 2) * 0.45; // afasta cada flecha lateralmente
+          this._spawnArrow(cx + perpX * spread, cy + perpY * spread, targetId, 'unit', tower.ownerId, archer.attackDamage, true);
+        });
         tower.resetTowerCooldown(archerCfg.attackCooldownTicks);
       }
     }
@@ -938,7 +953,7 @@ export class GameSession {
         }
         return b.toJSON();
       }),
-      projectiles: Array.from(this._projectiles.values()).map(p => ({ id: p.id, x: p.x, y: p.y, fx: p.fx, fy: p.fy, tx: p.tx, ty: p.ty })),
+      projectiles: Array.from(this._projectiles.values()).map(p => ({ id: p.id, x: p.x, y: p.y, fx: p.fx, fy: p.fy, tx: p.tx, ty: p.ty, elevated: p.elevated })),
     };
   }
 
@@ -1140,10 +1155,10 @@ export class GameSession {
   }
 
   /** Lança uma flecha da origem em direção ao alvo (dano aplicado ao atingir). */
-  private _spawnArrow(fromX: number, fromY: number, targetId: string, kind: AttackTargetKind, ownerId: string, damage: number): void {
+  private _spawnArrow(fromX: number, fromY: number, targetId: string, kind: AttackTargetKind, ownerId: string, damage: number, elevated: boolean): void {
     const id = uuidv4();
     this._projectiles.set(id, {
-      id, ownerId, x: fromX, y: fromY, fx: fromX, fy: fromY, targetId, targetKind: kind, damage, tx: fromX, ty: fromY,
+      id, ownerId, x: fromX, y: fromY, fx: fromX, fy: fromY, targetId, targetKind: kind, damage, tx: fromX, ty: fromY, elevated,
     });
   }
 
